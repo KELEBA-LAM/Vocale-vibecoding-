@@ -1,0 +1,58 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name        = "nexus-compose"
+version     = "1.0.0"
+description = "NEXUS unified software design pipeline — composability orchestration module"
+readme      = "README.md"
+requires-python = ">=3.11"
+license     = { text = "MIT" }
+
+dependencies = [
+    # graph / orchestration — zero hard deps beyond stdlib
+]
+
+[project.optional-dependencies]
+# Install only what you need for each tool
+q2d     = ["openai>=1.0"]
+likec4  = []                           # uses likec4 CLI binary
+opa     = []                           # uses opa CLI binary
+batfish = ["pybatfish>=2024.1"]
+neo4j   = ["neo4j>=5.0"]
+semgrep = []                           # uses semgrep CLI binary
+bearer  = []                           # uses bearer CLI binary
+codeql  = []                           # uses codeql CLI binary
+td      = ["requests>=2.31"]
+pytm    = ["pytm>=1.3"]
+clab    = ["jinja2>=3.0"]
+yaml    = ["pyyaml>=6.0"]
+all     = [
+    "openai>=1.0",
+    "pybatfish>=2024.1",
+    "neo4j>=5.0",
+    "requests>=2.31",
+    "pytm>=1.3",
+    "jinja2>=3.0",
+    "pyyaml>=6.0",
+]
+dev     = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+]
+
+[project.scripts]
+nexus-compose = "nexus_compose.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nexus_compose*"]
+
+[tool.setuptools.package-data]
+nexus_compose = ["nodes.json"]
+
+[tool.pytest.ini_options]
+timeout       = 30
+log_cli       = true
+log_cli_level = "INFO"
