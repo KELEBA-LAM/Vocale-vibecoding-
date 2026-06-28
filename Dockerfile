@@ -61,11 +61,16 @@ RUN curl -L -o /usr/local/bin/opa \
     && chmod +x /usr/local/bin/opa \
     && opa version
 
-RUN curl -sL https://containerlab.dev/setup | bash -s -- -y \
-    || (wget -q https://github.com/srl-labs/containerlab/releases/latest/download/containerlab_linux_amd64.tar.gz \
-        && tar xf containerlab_linux_amd64.tar.gz -C /usr/local/bin containerlab \
-        && chmod +x /usr/local/bin/containerlab \
-        && rm containerlab_linux_amd64.tar.gz)
+# FIX exit code 8 : containerlab.dev/setup avorte sans daemon Docker.
+# Containerlab = outil RUNTIME uniquement (privileged). On installe le binaire brut.
+RUN curl -fsSL \
+    "https://github.com/srl-labs/containerlab/releases/latest/download/containerlab_linux_amd64.tar.gz" \
+    -o /tmp/clab.tar.gz \
+    && tar -xzf /tmp/clab.tar.gz -C /tmp \
+    && mv /tmp/containerlab /usr/local/bin/containerlab \
+    && chmod +x /usr/local/bin/containerlab \
+    && rm -f /tmp/clab.tar.gz \
+    || echo "Containerlab: runtime only (privileged mode)"
 
 
 # ── STAGE 5 : OUTILS BINAIRES (Bearer + CodeQL + Structurizr) ────────────────
