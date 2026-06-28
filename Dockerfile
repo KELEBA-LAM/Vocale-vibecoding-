@@ -63,13 +63,16 @@ RUN curl -L -o /usr/local/bin/opa \
 
 # FIX exit code 8 : containerlab.dev/setup avorte sans daemon Docker.
 # Containerlab = outil RUNTIME uniquement (privileged). On installe le binaire brut.
+# find -name "containerlab" gère tous les cas de structure de tarball.
 RUN curl -fsSL \
     "https://github.com/srl-labs/containerlab/releases/latest/download/containerlab_linux_amd64.tar.gz" \
     -o /tmp/clab.tar.gz \
-    && tar -xzf /tmp/clab.tar.gz -C /tmp \
-    && mv /tmp/containerlab /usr/local/bin/containerlab \
+    && mkdir -p /tmp/clab_extract \
+    && tar -xzf /tmp/clab.tar.gz -C /tmp/clab_extract \
+    && find /tmp/clab_extract -name "containerlab" -type f -exec mv {} /usr/local/bin/containerlab \; \
     && chmod +x /usr/local/bin/containerlab \
-    && rm -f /tmp/clab.tar.gz \
+    && rm -rf /tmp/clab.tar.gz /tmp/clab_extract \
+    && containerlab version \
     || echo "Containerlab: runtime only (privileged mode)"
 
 
@@ -79,12 +82,9 @@ FROM go-tools AS binaries
 RUN curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh | sh -s -- -b /usr/local/bin \
     && bearer version
 
-RUN curl -L -o /tmp/codeql.tar.gz \
-       "https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz" \
-    && tar xf /tmp/codeql.tar.gz -C /usr/local/lib \
-    && ln -s /usr/local/lib/codeql/codeql /usr/local/bin/codeql \
-    && rm /tmp/codeql.tar.gz \
-    && codeql version
+# CodeQL bundle = ~2.5GB — trop lourd pour le build Docker (timeout + image géante)
+# CodeQL est géré via github/codeql-action dans ci.yml (action officielle GitHub)
+# RUN : SKIPPED — voir ci.yml job "codeql-scan"
 
 # FIX: printf interprète \n correctement (echo ne le fait pas dans /bin/sh)
 RUN mkdir -p /usr/local/lib/structurizr \
@@ -125,9 +125,11 @@ WORKDIR /app
 
 COPY . .
 
+# FIX SecretsUsedInArgOrEnv : ne jamais hardcoder les mots de passe dans ENV
+# Ces valeurs sont injectées à l'exécution via docker-compose.yml ou docker run -e
 ENV NEO4J_URI="bolt://neo4j:7687" \
     NEO4J_USER="neo4j" \
-    NEO4J_PASSWORD="nexuscompose" \
+    NEO4J_PASSWORD="" \
     OPA_URL="http://opa:8181" \
     THREAT_DRAGON_URL="http://threat-dragon:3000" \
     BATFISH_HOST="batfish" \
@@ -141,7 +143,6 @@ RUN echo "=== Vérification des outils ===" \
     && dotnet --version \
     && opa version \
     && bearer version \
-    && codeql version \
     && (likec4 --version || echo "likec4: OK") \
     && echo "=== Tous les outils sont présents ==="
 
