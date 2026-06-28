@@ -24,8 +24,25 @@ logger = logging.getLogger(__name__)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _cli(cmd: list[str], input_data: str | None = None, **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, input=input_data, **kw)
+# FIX: timeout par défaut pour éviter un blocage infini du process
+_CLI_TIMEOUT = int(os.environ.get("NEXUS_CLI_TIMEOUT", "120"))
+
+def _cli(
+    cmd: list[str],
+    input_data: str | None = None,
+    timeout: int = _CLI_TIMEOUT,
+    **kw,
+) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True,
+            input=input_data, timeout=timeout, **kw
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {cmd[0]}. "
+            f"Augmenter NEXUS_CLI_TIMEOUT (actuel={_CLI_TIMEOUT}s)."
+        )
 
 def _require(binary: str) -> str:
     path = shutil.which(binary)
@@ -905,16 +922,25 @@ OPA_HANDLERS = {
 #  7. BATFISH
 # ══════════════════════════════════════════════════════════════════════════════
 
+# FIX: cache module-level pour eviter une reconnexion Batfish a chaque appel
+_BF_SESSION_CACHE: dict = {}
+
 def _bf_init_session(ctx: dict):
+    host     = ctx.get("host",         "localhost")
+    network  = ctx.get("network",      "nexus-net")
+    snap     = ctx.get("snapshot",     "snap1")
+    snap_dir = ctx.get("snapshot_dir", ".")
+    cache_key = (host, network, snap)
+
+    if cache_key in _BF_SESSION_CACHE:
+        return _BF_SESSION_CACHE[cache_key]
+
     try:
         from pybatfish.client.session import Session
-        host    = ctx.get("host",     "localhost")
-        network = ctx.get("network",  "nexus-net")
-        snap    = ctx.get("snapshot", "snap1")
-        snap_dir = ctx.get("snapshot_dir", ".")
         bf = Session(host=host)
         bf.set_network(network)
         bf.init_snapshot(snap_dir, name=snap, overwrite=True)
+        _BF_SESSION_CACHE[cache_key] = bf
         return bf
     except ImportError:
         return None

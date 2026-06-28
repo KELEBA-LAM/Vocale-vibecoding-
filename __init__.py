@@ -112,16 +112,17 @@ from .registry import build as build_graph
 _patch_available: bool = False
 
 try:
-    from nexus_compose_patch.stub_eliminator import (
+    # FIX: imports relatifs — les modules sont dans le meme package (nexus_compose/)
+    from .stub_eliminator import (
         apply_patch,
         wrap_handler_safe,
         get_unavailability_report,
     )
-    from nexus_compose_patch.node_availability import (
+    from .node_availability import (
         NodeAvailabilityChecker,
         ExecutionPlan,
     )
-    from nexus_compose_patch.exceptions import (
+    from .exceptions import (
         NodeUnavailableError,
         NodeExecutionError,
         NodeExternalProcessError,
@@ -136,8 +137,8 @@ try:
 
 except ImportError:
     logger.warning(
-        "nexus_compose_patch non trouvé — les stubs silencieux restent actifs. "
-        "Installer avec : pip install -e nexus_compose_patch/"
+        "stub_eliminator / exceptions / node_availability non importables — les stubs silencieux restent actifs. "
+        "Vérifier que exceptions.py, stub_eliminator.py, node_availability.py existent dans le package."
     )
 
     # Fournir des stubs de remplacement no-op pour éviter les ImportError

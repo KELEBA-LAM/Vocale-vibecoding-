@@ -47,25 +47,16 @@ dev = [
 
 # FIX #4: entry point correct (pointe vers le module racine, pas nexus_compose.*)
 [project.scripts]
-nexus-compose = "__main__:main"
+nexus-compose = "nexus_compose.__main__:main"  # FIX: package path correct
 
 # FIX #2: les fichiers sont à la RACINE — pas dans un sous-dossier nexus_compose/
-[tool.setuptools]
-py-modules = [
-    "graph",
-    "registry",
-    "drivers",
-    "orchestrator",
-    "exceptions",
-    "node_availability",
-    "stub_eliminator",
-    "__init__",
-    "__main__",
-]
+# FIX: le code est dans nexus_compose/ (package), pas des modules plats
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nexus_compose*"]
 
-# FIX #3: nodes.json est à la racine, pas dans un package
 [tool.setuptools.package-data]
-"*" = ["nodes.json"]
+"nexus_compose" = ["nodes.json"]  # FIX: nodes.json est dans nexus_compose/
 
 [tool.pytest.ini_options]
 timeout = 30

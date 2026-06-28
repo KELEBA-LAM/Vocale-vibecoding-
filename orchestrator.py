@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
@@ -268,10 +269,11 @@ class Orchestrator:
         All nodes receive the same input ctx; outputs are merged at the end.
         Use only for nodes that have no data-flow dependency between them.
         """
-        ctx     = dict(ctx or {})
-        pr      = PipelineResult(context=ctx)
-        wall_t0 = time.monotonic()
-        futures = {}
+        ctx       = dict(ctx or {})
+        pr        = PipelineResult(context=ctx)
+        wall_t0   = time.monotonic()
+        futures   = {}
+        _ctx_lock = threading.Lock()   # FIX: ctx.update est thread-unsafe sans lock
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             for nid in node_ids:
@@ -293,15 +295,15 @@ class Orchestrator:
                     data        = result.data,
                     error       = result.error,
                 )
-                pr.steps.append(rec)
-                if self.on_step_done:
-                    self.on_step_done(rec)
-
-                if result.success and isinstance(result.data, dict):
-                    ctx.update(result.data)
-                else:
-                    pr.success = False
-                    pr.errors.append((nid, result.error or "error"))
+                with _ctx_lock:
+                    pr.steps.append(rec)
+                    if self.on_step_done:
+                        self.on_step_done(rec)
+                    if result.success and isinstance(result.data, dict):
+                        ctx.update(result.data)  # desormais protege par le Lock
+                    else:
+                        pr.success = False
+                        pr.errors.append((nid, result.error or "error"))
 
         pr.context  = ctx
         pr.total_ms = (time.monotonic() - wall_t0) * 1000
@@ -394,11 +396,90 @@ class Orchestrator:
     def greenfield_pipeline(self, ctx: Dict[str, Any] | None = None) -> PipelineResult:
         """
         Full greenfield run: LEON → Q2D → LikeC4 → C4IF → Containerlab →
-        OPA/Batfish → Threat Dragon → pytm → Neo4j → TMDD → code gen →
-        Semgrep/Bearer/CodeQL → REPORT → PRODUCTION.
+        OPA/Batfish → Threat Dragon → pytm → Neo4j → TMDD →
+        codegen.unified_system → Semgrep/Bearer/CodeQL → REPORT → PRODUCTION.
         """
         entry = "LEON"
         return self.run_from(entry, ctx)
+
+    def codegen_pipeline(
+        self,
+        prompt_file:  str                  = "agent_prompt.txt",
+        feature_name: str                  = "",
+        ctx:          Dict[str, Any] | None = None,
+    ) -> PipelineResult:
+        """
+        Génération de code via le Nexus Unified System.
+
+        Flux :
+            tmdd.tmdd_init → tmdd.tmdd_feature → tmdd.tmdd_lint
+            → tmdd.tmdd_compile → tmdd.generate_agent_prompt
+            → codegen.unified_system (UnifiedSystem.run_task)
+            → CODE_GENERATED → Semgrep → Bearer → CodeQL → Neo4j → REPORT
+
+        Args:
+            prompt_file:  chemin vers agent_prompt.txt déjà généré, ou ""
+                          pour le générer via tmdd.tmdd_compile dans le pipeline.
+            feature_name: nom de la feature à implémenter (passé à TMDD et au générateur).
+            ctx:          contexte initial (model_dir, oh_base_url, oh_token, etc.).
+
+        Variables d'env requises par UnifiedSystem:
+            OH_BASE_URL       URL OpenHands (défaut: http://localhost:3000)
+            OH_TOKEN          Bearer token OpenHands
+            CREWAI_LLM_MODEL  Modèle crewAI (défaut: gpt-4o-mini)
+            OPENAI_API_KEY    Clé API OpenAI
+        """
+        base_ctx = dict(ctx or {})
+        if prompt_file:
+            base_ctx.setdefault("prompt_file",   prompt_file)
+        if feature_name:
+            base_ctx.setdefault("feature_name",  feature_name)
+            base_ctx.setdefault("feat",          feature_name)
+
+        if prompt_file:
+            # Prompt déjà généré — sauter la phase TMDD, aller directement au générateur
+            node_ids = [
+                "codegen.unified_system",
+                "CODE_GENERATED",
+                "semgrep.semgrep_scan",
+                "semgrep.semgrep_ci",
+                "bearer.bearer_init",
+                "bearer.bearer_scan",
+                "bearer.rapport_security",
+                "bearer.rapport_privacy",
+                "bearer.export_sarif",
+                "codeql.codeql_database_create",
+                "codeql.codeql_database_analyze",
+                "codeql.suite_security_extended_qls_",
+                "neo4j.create",
+                "REPORT",
+            ]
+        else:
+            # Pipeline complet : TMDD compile → génère prompt → codegen → audit
+            node_ids = [
+                "tmdd.tmdd_init",
+                "tmdd.tmdd_feature",
+                "tmdd.generate_threat_model_prompt",
+                "tmdd.tmdd_lint",
+                "tmdd.tmdd_compile",
+                "tmdd.generate_agent_prompt",
+                "codegen.unified_system",
+                "CODE_GENERATED",
+                "semgrep.semgrep_scan",
+                "semgrep.semgrep_ci",
+                "bearer.bearer_init",
+                "bearer.bearer_scan",
+                "bearer.rapport_security",
+                "bearer.rapport_privacy",
+                "bearer.export_sarif",
+                "codeql.codeql_database_create",
+                "codeql.codeql_database_analyze",
+                "codeql.suite_security_extended_qls_",
+                "neo4j.create",
+                "REPORT",
+            ]
+
+        return self.run_pipeline(node_ids, base_ctx)
 
     def audit_only_pipeline(
         self,
@@ -432,8 +513,10 @@ class Orchestrator:
         ctx: Dict[str, Any] | None = None,
     ) -> PipelineResult:
         """
-        Threat-modelling-only pipeline from an existing C4 architecture dict.
-        likec4_export_json → pytm → TD → Neo4j → TMDD → constraint injection
+        Threat-modelling + code generation pipeline from an existing C4 architecture dict.
+
+        likec4_export_json → pytm → TD → Neo4j → TMDD → codegen.unified_system
+        → CODE_GENERATED → audit
         """
         base_ctx = dict(ctx or {}, architecture=architecture_json)
         node_ids = [
@@ -443,6 +526,7 @@ class Orchestrator:
             "pytm.json",
             "pytm.tm_dfd",
             "pytm.tm_report",
+            "pytm.llm_threats",
             "td.threatmodelcontroller_create",
             "td.editeur_de_diagramme_x6_form",
             "td.stride_js",
@@ -454,6 +538,13 @@ class Orchestrator:
             "tmdd.tmdd_lint",
             "tmdd.tmdd_compile",
             "tmdd.generate_agent_prompt",
+            "codegen.unified_system",       # ← câble Nexus Unified System
+            "CODE_GENERATED",
+            "semgrep.semgrep_scan",
+            "bearer.bearer_scan",
+            "codeql.codeql_database_create",
+            "codeql.codeql_database_analyze",
+            "neo4j.create",
             "REPORT",
         ]
         return self.run_pipeline(node_ids, base_ctx)
