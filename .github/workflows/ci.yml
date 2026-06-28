@@ -1,0 +1,230 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# .github/workflows/ci.yml — Nexus Compose / Vocal Vibecoding Factory
+#
+# SE DÉCLENCHE :
+#   - À chaque push sur main ou develop
+#   - À chaque Pull Request vers main
+#   - Manuellement via GitHub UI (workflow_dispatch)
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Nexus Compose CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:    # Lancement manuel depuis GitHub UI
+
+env:
+  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/nexus-compose
+  PYTHON_VERSION: "3.11"
+
+# ══════════════════════════════════════════════════════════════════════════════
+jobs:
+
+  # ── JOB 1 : BUILD DOCKER IMAGE ────────────────────────────────────────────
+  build:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Login GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx (builds plus rapides)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build et push de l'image Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}   # Push seulement sur main
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:latest
+            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha          # Cache GitHub Actions (builds rapides)
+          cache-to: type=gha,mode=max
+
+
+  # ── JOB 2 : TESTS UNITAIRES ───────────────────────────────────────────────
+  test:
+    name: 🧪 Tests Unitaires
+    runs-on: ubuntu-latest
+    needs: build
+
+    # Services Docker lancés en parallèle pendant les tests
+    services:
+      neo4j:
+        image: neo4j:5.18-community
+        env:
+          NEO4J_AUTH: neo4j/nexuscompose
+        ports:
+          - 7474:7474
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p nexuscompose 'RETURN 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      opa:
+        image: openpolicyagent/opa:latest-static
+        ports:
+          - 8181:8181
+        options: >-
+          --entrypoint '["opa", "run", "--server", "--addr=0.0.0.0:8181"]'
+
+      batfish:
+        image: batfish/allinone:latest
+        ports:
+          - 9996:9996
+          - 9997:9997
+
+      threat-dragon:
+        image: owasp/threat-dragon:latest
+        env:
+          NODE_ENV: production
+          ENCRYPTION_KEYS: '[{"isPrimary":true,"id":1,"value":"nexus-compose-key-32chars!!"}]'
+          ENCRYPTION_JWT_SIGNING_KEY: nexus-jwt-secret-key
+        ports:
+          - 3000:3000
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Installer les dépendances Python
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install git+https://github.com/i-need-a-pencil/query2diagram.git
+
+      - name: Installer Node.js + LikeC4
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Installer LikeC4 CLI
+        run: npm install -g @likec4/cli
+
+      - name: Installer .NET SDK (C4InterFlow)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.x"
+
+      - name: Installer C4InterFlow CLI
+        run: dotnet tool install --global C4InterFlow.Cli || echo "C4InterFlow: skip"
+
+      - name: Installer OPA
+        run: |
+          curl -L -o /usr/local/bin/opa \
+            https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - name: Installer Bearer
+        run: |
+          curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+          bearer version
+
+      - name: Installer CodeQL
+        run: |
+          curl -L -o /tmp/codeql.tar.gz \
+            "https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz"
+          tar xf /tmp/codeql.tar.gz -C /usr/local/lib
+          ln -s /usr/local/lib/codeql/codeql /usr/local/bin/codeql
+          codeql version
+
+      - name: Installer Structurizr CLI
+        run: |
+          mkdir -p /usr/local/lib/structurizr
+          curl -L -o /usr/local/lib/structurizr/structurizr-cli.jar \
+            "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.jar"
+          echo '#!/bin/bash' > /usr/local/bin/structurizr
+          echo 'java -jar /usr/local/lib/structurizr/structurizr-cli.jar "$@"' >> /usr/local/bin/structurizr
+          chmod +x /usr/local/bin/structurizr
+
+      - name: Attendre Neo4j (healthcheck)
+        run: |
+          echo "Attente Neo4j..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:7474 > /dev/null 2>&1; then
+              echo "Neo4j prêt !"
+              break
+            fi
+            echo "Tentative $i/30..."
+            sleep 3
+          done
+
+      - name: Lancer les tests pytest
+        env:
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: nexuscompose
+          OPA_URL: http://localhost:8181
+          THREAT_DRAGON_URL: http://localhost:3000
+          BATFISH_HOST: localhost
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          pytest test_nexus_compose.py \
+            --timeout=120 \
+            --tb=short \
+            -v
+
+      - name: Upload rapport de tests
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.sha }}
+          path: |
+            .pytest_cache/
+            *.log
+
+
+  # ── JOB 3 : DEPLOY (seulement sur main) ───────────────────────────────────
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Login GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag image comme stable
+        run: |
+          docker pull ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          docker tag ${{ env.DOCKER_IMAGE }}:${{ github.sha }} \
+                     ${{ env.DOCKER_IMAGE }}:stable
+          docker push ${{ env.DOCKER_IMAGE }}:stable
+
+      - name: Résumé du déploiement
+        run: |
+          echo "## ✅ Déploiement réussi" >> $GITHUB_STEP_SUMMARY
+          echo "- Image : \`${{ env.DOCKER_IMAGE }}:stable\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Déclenché par : \`${{ github.actor }}\`" >> $GITHUB_STEP_SUMMARY
