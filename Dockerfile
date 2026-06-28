@@ -25,7 +25,7 @@ FROM base AS nodejs
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g npm@latest \
-    && npm install -g @likec4/cli \
+    && npm install -g likec4 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 
@@ -86,13 +86,14 @@ RUN curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/insta
 # CodeQL est géré via github/codeql-action dans ci.yml (action officielle GitHub)
 # RUN : SKIPPED — voir ci.yml job "codeql-scan"
 
-# FIX: printf interprète \n correctement (echo ne le fait pas dans /bin/sh)
+# FIX: printf interprète \n correctement + || true si URL 404
 RUN mkdir -p /usr/local/lib/structurizr \
-    && curl -L -o /usr/local/lib/structurizr/structurizr-cli.jar \
+    && curl -fL -o /usr/local/lib/structurizr/structurizr-cli.jar \
        "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.jar" \
     && printf '#!/bin/bash\njava -jar /usr/local/lib/structurizr/structurizr-cli.jar "$@"\n' \
        > /usr/local/bin/structurizr \
-    && chmod +x /usr/local/bin/structurizr
+    && chmod +x /usr/local/bin/structurizr \
+    || echo "Structurizr: non disponible (URL 404)"
 
 
 # ── STAGE 6 : PYTHON PACKAGES ────────────────────────────────────────────────
@@ -111,9 +112,11 @@ RUN pip install --no-cache-dir --upgrade pip \
 # ── STAGE 7 : LEON AI (Voice Assistant) ──────────────────────────────────────
 FROM python-deps AS leon
 
+# FIX EBADDEVENGINES : Leon exige pnpm, pas npm
 RUN git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon \
     && cd /opt/leon \
-    && npm install --production
+    && npm install -g pnpm \
+    && pnpm install --prod
 
 ENV LEON_PATH="/opt/leon"
 
