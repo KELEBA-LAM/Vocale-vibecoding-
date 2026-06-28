@@ -29,20 +29,27 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 
-# ── STAGE 3 : .NET (C4InterFlow) ─────────────────────────────────────────────
+# ── STAGE 3 : .NET SDK (source officielle Microsoft) ─────────────────────────
+# FIX exit code 134 : dotnet-install.sh crashe (SIGABRT) sur python:3.11-slim
+# car les librairies libicu/libssl/zlib1g sont absentes.
+# Solution : copier le SDK depuis l'image officielle Microsoft — aucune install requise.
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dotnet-sdk
+
 FROM nodejs AS dotnet
 
-# FIX: dotnet-install.sh officiel — plus fiable que le package apt Microsoft
-#      qui échoue avec exit code 100 quand packages-microsoft-prod.deb est inaccessible
-ENV DOTNET_ROOT="/root/.dotnet"
-ENV PATH="${PATH}:/root/.dotnet:/root/.dotnet/tools"
+# Copier le binaire dotnet depuis l'image officielle
+COPY --from=dotnet-sdk /usr/share/dotnet /usr/share/dotnet
+RUN ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
 
-RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
-    && chmod +x /tmp/dotnet-install.sh \
-    && /tmp/dotnet-install.sh --channel 8.0 --install-dir /root/.dotnet \
-    && rm /tmp/dotnet-install.sh \
-    && dotnet --version
+# Installer les dépendances système manquantes pour .NET sur Debian slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libicu-dev libssl-dev zlib1g \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+ENV DOTNET_ROOT="/usr/share/dotnet"
+ENV PATH="${PATH}:/usr/share/dotnet:/root/.dotnet/tools"
+
+RUN dotnet --version
 RUN dotnet tool install --global C4InterFlow.Cli || true
 
 
