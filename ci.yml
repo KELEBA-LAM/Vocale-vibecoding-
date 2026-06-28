@@ -1,0 +1,328 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# .github/workflows/ci.yml — Nexus Compose / Vocal Vibecoding Factory
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Nexus Compose CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DOCKER_IMAGE: ghcr.io/keleba-lam/nexus-compose
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "24"
+  PNPM_VERSION: "9"            # LTS stable — pas "latest" pour la reproductibilité
+
+
+jobs:
+
+  # ── JOB 1 : BUILD DOCKER IMAGE ──────────────────────────────────────────
+  build:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build et push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:latest
+            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+  # ── JOB 2 : TESTS UNITAIRES ─────────────────────────────────────────────
+  test:
+    name: 🧪 Tests Unitaires
+    runs-on: ubuntu-latest
+    # FIX #1: test ne dépend PAS de build — Docker et Python sont orthogonaux.
+    # Avant : needs: build forçait 5-10 min d'attente inutile avant chaque test.
+    # Maintenant : build et test tournent en parallèle.
+
+    services:
+      neo4j:
+        image: neo4j:5.18-community
+        env:
+          NEO4J_AUTH: neo4j/nexuscompose
+        ports:
+          - 7474:7474
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p nexuscompose RETURN 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+
+      # FIX #2: image latest-static (binaire statique, pas de dépendances libc).
+      # L'image `latest` (non-static) peut avoir des problèmes de démarrage
+      # dans les containers services GitHub Actions.
+      opa:
+        image: openpolicyagent/opa:latest-static
+        ports:
+          - 8181:8181
+        # FIX #3: health-cmd via curl (wget absent dans l'image runner ubuntu-latest)
+        options: >-
+          --health-cmd "curl -sf http://localhost:8181/health || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 10s
+
+      batfish:
+        image: batfish/allinone:latest
+        ports:
+          - 9996:9996
+          - 9997:9997
+
+      threat-dragon:
+        image: owasp/threat-dragon:latest
+        env:
+          NODE_ENV: production
+          ENCRYPTION_KEYS: '[{"isPrimary":true,"id":1,"value":"nexus-compose-key-32chars!!"}]'
+          ENCRYPTION_JWT_SIGNING_KEY: nexus-jwt-secret-key
+        ports:
+          - 3000:3000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Python ──────────────────────────────────────────────────────────
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # FIX #4: les fichiers sont à la racine (structure plate) mais les tests
+      # importent `from nexus_compose import ...` qui nécessite un package.
+      # Ce step crée nexus_compose/ depuis les fichiers plats si absent.
+      # Solution définitive du repo : git mv *.py nexus_compose/
+      - name: Préparer le package nexus_compose
+        run: |
+          if [ ! -d "nexus_compose" ]; then
+            echo "Structure plate détectée — création du package nexus_compose/"
+            mkdir nexus_compose
+            for f in __init__.py __main__.py graph.py orchestrator.py registry.py \
+                      drivers.py exceptions.py node_availability.py \
+                      stub_eliminator.py nodes.json; do
+              if [ -f "$f" ]; then
+                cp "$f" "nexus_compose/$f"
+                echo "  ✓ copié : $f"
+              fi
+            done
+          else
+            echo "Package nexus_compose/ déjà présent — OK"
+          fi
+
+      - name: Installer les dépendances Python
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install git+https://github.com/i-need-a-pencil/query2diagram.git
+          # FIX #5: pip install -e . pour que `from nexus_compose import ...` fonctionne
+          # Sans ça, pytest échoue immédiatement avec ModuleNotFoundError.
+          pip install -e .
+
+      # ── Node.js ─────────────────────────────────────────────────────────
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ════════════════════════════════════════════════════════════════════
+      # FIX PRIMARY — PNPM
+      # ════════════════════════════════════════════════════════════════════
+      # Avant (CASSÉ) :
+      #   npm install -g pnpm        → version npm officieuse, pas le vrai pnpm
+      #   corepack enable + prepare  → EBADDEVENGINES, conflits de version CI
+      #
+      # Après (CORRECT) :
+      #   pnpm/action-setup@v4       → télécharge pnpm directement depuis
+      #   les releases officielles pnpm (github.com/pnpm/pnpm/releases),
+      #   sans passer par npm, sans corepack, sans conflits.
+      #   C'est la méthode recommandée dans la doc officielle pnpm.
+      # ════════════════════════════════════════════════════════════════════
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Vérifier pnpm
+        run: pnpm --version
+
+      # LikeC4 : installé via npm (CLI global indépendant de Leon)
+      - name: Installer LikeC4 CLI
+        run: npm install -g @likec4/cli
+
+      # Leon : installé via pnpm (son package.json est pnpm-aware)
+      - name: Installer Leon AI
+        run: |
+          git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon
+          cd /opt/leon
+          # FIX: esbuild a besoin de son postinstall
+          echo 'onlyBuiltDependencies[] = esbuild' >> .npmrc
+          # FIX: --omit=dev (--prod déprécié depuis pnpm v7)
+          pnpm install --omit=dev
+
+      # ── .NET ────────────────────────────────────────────────────────────
+      - name: Setup .NET SDK 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.x"
+
+      - name: Installer C4InterFlow CLI
+        run: dotnet tool install --global C4InterFlow.Cli
+        continue-on-error: true
+
+      # ── Outils CLI binaires ──────────────────────────────────────────────
+      - name: Installer OPA
+        run: |
+          curl -sSL -o /usr/local/bin/opa \
+            https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - name: Installer Bearer
+        run: |
+          curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+          bearer version
+
+      # FIX #6: CodeQL SUPPRIMÉ de ce job.
+      # Le step précédent téléchargeait depuis codeql-action/releases (URL erronée —
+      # le bundle est dans github/codeql-cli-binaries, pas codeql-action).
+      # CodeQL est géré proprement dans le job dédié `codeql` ci-dessous.
+
+      - name: Installer Structurizr CLI
+        run: |
+          mkdir -p /usr/local/lib/structurizr
+          curl -sSL -o /usr/local/lib/structurizr/structurizr-cli.jar \
+            "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.jar"
+          printf '#!/bin/bash\njava -jar /usr/local/lib/structurizr/structurizr-cli.jar "$@"\n' \
+            > /usr/local/bin/structurizr
+          chmod +x /usr/local/bin/structurizr
+
+      # ── Attente services ─────────────────────────────────────────────────
+      - name: Attendre Neo4j
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:7474 > /dev/null 2>&1; then
+              echo "✓ Neo4j prêt (${i}x3s)"
+              break
+            fi
+            echo "Tentative $i/30..."
+            sleep 3
+          done
+
+      # ── Tests ─────────────────────────────────────────────────────────────
+      - name: Lancer les tests pytest
+        env:
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: nexuscompose
+          OPA_URL: http://localhost:8181
+          THREAT_DRAGON_URL: http://localhost:3000
+          BATFISH_HOST: localhost
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          pytest test_nexus_compose.py \
+            --timeout=120 \
+            --tb=short \
+            -v
+
+      - name: Upload rapport de tests
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.sha }}
+          path: |
+            .pytest_cache/
+            *.log
+
+
+  # ── JOB 3 : CODEQL SCAN ──────────────────────────────────────────────────
+  # CodeQL géré via l'action officielle (bundle ~2.5GB — trop lourd pour le Dockerfile).
+  codeql:
+    name: 🔍 CodeQL Scan
+    runs-on: ubuntu-latest
+    # FIX #7: codeql ne dépend PAS de build — analyse statique 100% indépendante.
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialiser CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Auto-build
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyser
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+
+
+  # ── JOB 4 : DEPLOY ───────────────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    needs: [build, test, codeql]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Tag image stable
+        run: |
+          docker pull ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          docker tag  ${{ env.DOCKER_IMAGE }}:${{ github.sha }} \
+                      ${{ env.DOCKER_IMAGE }}:stable
+          docker push ${{ env.DOCKER_IMAGE }}:stable
+
+      - name: Résumé du déploiement
+        run: |
+          echo "## ✅ Déploiement réussi" >> $GITHUB_STEP_SUMMARY
+          echo "- Image : \`${{ env.DOCKER_IMAGE }}:stable\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Déclenché par : \`${{ github.actor }}\`" >> $GITHUB_STEP_SUMMARY

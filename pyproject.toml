@@ -4,7 +4,7 @@
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-# FIX #1: build-backend correct (setuptools.backends.legacy:build n'existe pas)
+# FIX: "setuptools.backends.legacy:build" n'existe pas → setuptools.build_meta
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -45,18 +45,17 @@ dev = [
     "pytest-timeout>=2.3",
 ]
 
-# FIX #4: entry point correct (pointe vers le module racine, pas nexus_compose.*)
+# Entry point — pointe vers nexus_compose/__main__.py
 [project.scripts]
-nexus-compose = "nexus_compose.__main__:main"  # FIX: package path correct
+nexus-compose = "nexus_compose.__main__:main"
 
-# FIX #2: les fichiers sont à la RACINE — pas dans un sous-dossier nexus_compose/
-# FIX: le code est dans nexus_compose/ (package), pas des modules plats
+# Package discovery : cherche nexus_compose/ dans la racine du repo
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nexus_compose*"]
 
 [tool.setuptools.package-data]
-"nexus_compose" = ["nodes.json"]  # FIX: nodes.json est dans nexus_compose/
+nexus_compose = ["nodes.json"]
 
 [tool.pytest.ini_options]
 timeout = 30
