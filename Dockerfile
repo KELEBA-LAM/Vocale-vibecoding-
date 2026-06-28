@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── STAGE 2 : NODE.JS (Leon + LikeC4) ───────────────────────────────────────
 FROM base AS nodejs
 
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g npm@latest \
     && npm install -g @likec4/cli \
@@ -32,15 +32,17 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # ── STAGE 3 : .NET (C4InterFlow) ─────────────────────────────────────────────
 FROM nodejs AS dotnet
 
-RUN wget -q https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb \
-    && dpkg -i packages-microsoft-prod.deb \
-    && apt-get update \
-    && apt-get install -y dotnet-sdk-8.0 \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && rm packages-microsoft-prod.deb
+# FIX: dotnet-install.sh officiel — plus fiable que le package apt Microsoft
+#      qui échoue avec exit code 100 quand packages-microsoft-prod.deb est inaccessible
+ENV DOTNET_ROOT="/root/.dotnet"
+ENV PATH="${PATH}:/root/.dotnet:/root/.dotnet/tools"
 
-# FIX: ${PATH} stable dans Dockerfile + || true pour package optionnel
-ENV PATH="${PATH}:/root/.dotnet/tools"
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+    && chmod +x /tmp/dotnet-install.sh \
+    && /tmp/dotnet-install.sh --channel 8.0 --install-dir /root/.dotnet \
+    && rm /tmp/dotnet-install.sh \
+    && dotnet --version
+
 RUN dotnet tool install --global C4InterFlow.Cli || true
 
 
