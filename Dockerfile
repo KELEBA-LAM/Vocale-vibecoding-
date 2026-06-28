@@ -26,7 +26,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g npm@latest \
     && npm install -g likec4 \
+    && corepack enable \
+    && corepack prepare pnpm@latest --activate \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PNPM_HOME="/root/.local/share/pnpm"
+ENV PATH="${PNPM_HOME}:${PATH}"
 
 
 # ── STAGE 3 : .NET SDK (source officielle Microsoft) ─────────────────────────
@@ -112,11 +117,13 @@ RUN pip install --no-cache-dir --upgrade pip \
 # ── STAGE 7 : LEON AI (Voice Assistant) ──────────────────────────────────────
 FROM python-deps AS leon
 
-# FIX EBADDEVENGINES : Leon exige pnpm, pas npm
+# FIX EBADDEVENGINES : pnpm installé via corepack (pas via npm)
+# FIX allow-scripts : esbuild a besoin de son postinstall → onlyBuiltDependencies
+# FIX --prod déprécié → --omit=dev
 RUN git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon \
     && cd /opt/leon \
-    && npm install -g pnpm \
-    && pnpm install --prod
+    && echo "onlyBuiltDependencies[]= esbuild" >> .npmrc \
+    && pnpm install --omit=dev
 
 ENV LEON_PATH="/opt/leon"
 
