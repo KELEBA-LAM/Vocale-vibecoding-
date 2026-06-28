@@ -122,6 +122,7 @@ Q2D_HANDLERS = {
     "migration":              _q2d_migration,
     "find_similar_items":     _q2d_similar,
     "openaiengine_generate":  _q2d_llm,
+    "convert_str_graph":      _q2d_convert_str_graph,
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -339,7 +340,7 @@ def _lc4_preview(ctx: dict) -> dict:
     w   = ctx.get("workspace", ".")
     out = ctx.get("output",    "preview")
     try:
-        r = _cli([_require("likec4"), "build", "--preview", w, "-o", out])
+        r = _cli([_require("likec4"), "preview", w, "--output", out])
         return {"exit_code": r.returncode, "output_dir": out}
     except Exception as e:
         return _stub_result("likec4.likec4_preview", ctx, str(e))
@@ -433,7 +434,7 @@ LIKEC4_HANDLERS = {
     "read_deployment":            _lc4_read_depl,
     "read_project_summary":       _lc4_read_project_summary,
     "subgraph_summary":           _lc4_subgraph_summary,
-    "find_relationships":         _lc4_find_rel,
+    "find_relationship_paths":    _lc4_find_rel,
     "element_diff":               _lc4_element_diff,
     "open_view":                  _lc4_open_view,
     "apply_semantic_layout":      _lc4_apply_layout,
@@ -453,7 +454,7 @@ def _c4if_execute(ctx: dict) -> dict:
         workspace = ctx.get("workspace", ".")
         strategy  = ctx.get("strategy", "default")
         r = _cli([_require("dotnet"), "run", "--project", workspace,
-                  "--strategy", strategy])
+                  "--", "--strategy", strategy])
         return {"exit_code": r.returncode, "output": r.stdout}
     except Exception as e:
         return _stub_result("c4if.executeaacstrategycommand", ctx, str(e))
@@ -631,8 +632,7 @@ def _clab_graph(ctx: dict) -> dict:
     topo = ctx.get("topology", "topology.clab.yml")
     out  = ctx.get("output", "topology.html")
     try:
-        r = _cli([_require("containerlab"), "graph", "-t", topo, "--srv", ":0",
-                  "--static", out])
+        r = _cli([_require("containerlab"), "graph", "-t", topo, "--static", out])
         return {"output_file": out, "exit_code": r.returncode}
     except Exception as e:
         return _stub_result("clab.clab_graph", ctx, str(e))
@@ -919,6 +919,24 @@ def _bf_init_session(ctx: dict):
     except ImportError:
         return None
 
+def _bf_to_camel(fn_name: str) -> str:
+    """Case-insensitive lookup of a pybatfish question function name.
+
+    pybatfish uses camelCase (testFilters, bgpEdges, …) but our handler keys
+    store lowercase names (testfilters, bgpedges, …).  This helper scans the
+    question module's attributes and returns the correctly-cased name so that
+    getattr() can succeed.
+    """
+    try:
+        import pybatfish.question.question as _bfq
+        for attr in dir(_bfq):
+            if attr.lower() == fn_name.lower():
+                return attr
+    except ImportError:
+        pass
+    return fn_name  # fallback: return as-is (will still fail, but message is clear)
+
+
 def _bf_question(name: str):
     def _handler(ctx: dict) -> dict:
         bf = _bf_init_session(ctx)
@@ -926,9 +944,15 @@ def _bf_question(name: str):
             return _stub_result(f"bf.{name}", ctx, "pybatfish not installed")
         try:
             import pybatfish.question.question as bfq
-            q_fn = getattr(bfq, name.replace("bfq_", ""), None)
+            raw_name  = name.replace("bfq_", "")
+            camel_name = _bf_to_camel(raw_name)
+            q_fn = getattr(bfq, camel_name, None)
             if q_fn is None:
-                raise AttributeError(f"pybatfish has no question {name}")
+                raise AttributeError(
+                    f"pybatfish has no question '{camel_name}' "
+                    f"(looked up from '{raw_name}'). "
+                    f"Available: {[a for a in dir(bfq) if not a.startswith('_')]}"
+                )
             df = q_fn().answer().frame()
             return {"rows": df.to_dict(orient="records"), "columns": list(df.columns)}
         except Exception as e:
@@ -1166,11 +1190,12 @@ def _pytm_resolve(ctx: dict) -> dict:
         if script and Path(script).exists():
             # Run with --json to capture resolved threats
             out_file = ctx.get("json_output", "threat_model.json")
-            r = _cli(["python", script, "--json", out_file])
+            # pytm --json writes to stdout, not to a file path argument
+            r = _cli(["python", script, "--json"])
             if r.returncode == 0:
                 try:
-                    import os
-                    findings = json.loads(open(out_file).read()) if os.path.exists(out_file) else json.loads(r.stdout)
+                    findings = json.loads(r.stdout)
+                    Path(out_file).write_text(r.stdout, encoding="utf-8")
                     return {"resolved": findings, "methodologies": [
                         "STRIDE", "CIA", "CIADIE", "LINDDUN", "PLOT4ai", "EOP"
                     ]}
@@ -1257,25 +1282,56 @@ def _pytm_seq(ctx: dict) -> dict:
 
 
 def _pytm_list(ctx: dict) -> dict:
-    """--list — lists all threats in the threatlib (114 CAPEC entries)."""
+    """List all threats in the pytm threatlib (114 CAPEC entries) via Python API.
+
+    pytm has no __main__.py so 'python -m pytm' is not supported.
+    We use the pytm.threat module directly instead.
+    """
     try:
-        r = _cli(["python", "-m", "pytm", "--list"])
-        if r.returncode == 0:
-            threats = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
-            return {"threats": threats, "count": len(threats)}
-        raise RuntimeError(r.stderr)
-    except Exception as e:
-        return _stub_result("pytm.list", ctx, str(e))
+        from pytm.threat import Threat
+        threats = Threat.risks()
+        items   = [{"id": str(t), "description": getattr(t, "description", "")}
+                   for t in threats]
+        return {"threats": items, "count": len(items)}
+    except Exception:
+        # Fallback: pytm older API — iterate ThreatObj list
+        try:
+            import pytm as _pytm
+            items = []
+            for attr in dir(_pytm):
+                obj = getattr(_pytm, attr, None)
+                if isinstance(obj, type) and issubclass(obj, getattr(_pytm, "Threat", type)):
+                    items.append({"id": attr})
+            return {"threats": items, "count": len(items),
+                    "note": "fallback: class-based threat enumeration"}
+        except Exception as e:
+            return _stub_result("pytm.list", ctx, str(e))
 
 
 def _pytm_describe(ctx: dict) -> dict:
-    """--describe <ElementType> — introspects available properties."""
+    """Introspect available properties of a pytm element type via Python API.
+
+    pytm has no __main__.py so 'python -m pytm' is not supported.
+    We use getattr inspection on the pytm module directly instead.
+    """
     try:
         element_type = ctx.get("element_type", "Server")
-        r = _cli(["python", "-m", "pytm", "--describe", element_type])
-        if r.returncode == 0:
-            return {"element_type": element_type, "properties": r.stdout}
-        raise RuntimeError(r.stderr)
+        import pytm as _pytm
+        cls = getattr(_pytm, element_type, None)
+        if cls is None:
+            available = [a for a in dir(_pytm) if not a.startswith("_")]
+            raise AttributeError(
+                f"pytm has no element '{element_type}'. "
+                f"Available: {available}"
+            )
+        # Collect public class attributes (non-callable, non-dunder)
+        props = {
+            k: repr(v)
+            for k, v in vars(cls).items()
+            if not k.startswith("_") and not callable(v)
+        }
+        return {"element_type": element_type, "properties": props,
+                "module": cls.__module__}
     except Exception as e:
         return _stub_result("pytm.describe", ctx, str(e))
 
@@ -1504,49 +1560,77 @@ def _neo4j_schema(ctx: dict) -> dict:
 
 def _neo4j_node_type_props(ctx: dict) -> dict:
     """db.schema.nodeTypeProperties() — list properties per node/rel type."""
-    with _neo4j_driver(ctx) as drv:
-        with drv.session() as s:
+    driver = _neo4j_driver(ctx)
+    if not driver:
+        return _stub_result("neo4j.db_schema_nodetypeproperties", ctx,
+                            "neo4j driver not installed")
+    try:
+        with driver.session() as s:
             result = s.run("CALL db.schema.nodeTypeProperties()")
-            return {"nodeTypeProperties": [dict(r) for r in result]}
+            data = {"nodeTypeProperties": [dict(r) for r in result]}
+        driver.close()
+        return data
+    except Exception as e:
+        return _stub_result("neo4j.db_schema_nodetypeproperties", ctx, str(e))
 
 
 def _neo4j_labels(ctx: dict) -> dict:
     """db.labels() / db.relationshipTypes() / db.propertyKeys()."""
-    with _neo4j_driver(ctx) as drv:
-        with drv.session() as s:
-            labels = [r["label"] for r in s.run("CALL db.labels()")]
+    driver = _neo4j_driver(ctx)
+    if not driver:
+        return _stub_result("neo4j.db_labels", ctx, "neo4j driver not installed")
+    try:
+        with driver.session() as s:
+            labels    = [r["label"]           for r in s.run("CALL db.labels()")]
             rel_types = [r["relationshipType"] for r in s.run("CALL db.relationshipTypes()")]
-            prop_keys = [r["propertyKey"] for r in s.run("CALL db.propertyKeys()")]
-            return {"labels": labels, "relationshipTypes": rel_types, "propertyKeys": prop_keys}
+            prop_keys = [r["propertyKey"]      for r in s.run("CALL db.propertyKeys()")]
+        driver.close()
+        return {"labels": labels, "relationshipTypes": rel_types, "propertyKeys": prop_keys}
+    except Exception as e:
+        return _stub_result("neo4j.db_labels", ctx, str(e))
 
 
 def _neo4j_constraints(ctx: dict) -> dict:
     """CREATE CONSTRAINT / CREATE INDEX for uniqueness or performance."""
+    driver = _neo4j_driver(ctx)
+    if not driver:
+        return _stub_result("neo4j.contraintes_index_create_con", ctx,
+                            "neo4j driver not installed")
     label    = ctx.get("label",    "Node")
     prop     = ctx.get("property", "id")
     name     = ctx.get("name",     f"constraint_{label}_{prop}")
     idx_type = ctx.get("type",     "uniqueness")   # uniqueness | index
-    with _neo4j_driver(ctx) as drv:
-        with drv.session() as s:
+    try:
+        with driver.session() as s:
             if idx_type == "uniqueness":
                 s.run(f"CREATE CONSTRAINT {name} IF NOT EXISTS "
                       f"FOR (n:{label}) REQUIRE n.{prop} IS UNIQUE")
             else:
                 s.run(f"CREATE INDEX {name} IF NOT EXISTS "
                       f"FOR (n:{label}) ON (n.{prop})")
-            return {"created": name, "type": idx_type, "label": label, "property": prop}
+        driver.close()
+        return {"created": name, "type": idx_type, "label": label, "property": prop}
+    except Exception as e:
+        return _stub_result("neo4j.contraintes_index_create_con", ctx, str(e))
 
 
 def _neo4j_listconfig(ctx: dict) -> dict:
     """CALL dbms.listConfig() — list runtime Neo4j configuration."""
+    driver = _neo4j_driver(ctx)
+    if not driver:
+        return _stub_result("neo4j.dbms_listconfig", ctx, "neo4j driver not installed")
     prefix = ctx.get("prefix", "")
-    with _neo4j_driver(ctx) as drv:
-        with drv.session() as s:
+    try:
+        with driver.session() as s:
             cypher = "CALL dbms.listConfig()"
             if prefix:
                 cypher += f" YIELD name, value WHERE name STARTS WITH '{prefix}'"
             result = s.run(cypher)
-            return {"config": [dict(r) for r in result]}
+            data = {"config": [dict(r) for r in result]}
+        driver.close()
+        return data
+    except Exception as e:
+        return _stub_result("neo4j.dbms_listconfig", ctx, str(e))
 
 
 def _neo4j_stub(name: str):
@@ -1608,7 +1692,9 @@ def _tmdd_prompt(ctx: dict) -> dict:
     feature   = ctx.get("feature_name")
     try:
         import sys as _sys, importlib
-        _sys.path.insert(0, str(Path(model_dir).parent))
+        # src/generators/agent_prompt.py lives in tmdd-main/tmdd-main/
+        _TMDD_ROOT = Path(__file__).parent.parent / "tmdd-main" / "tmdd-main"
+        _sys.path.insert(0, str(_TMDD_ROOT))
         gen_mod  = importlib.import_module("src.generators.agent_prompt")
         util_mod = importlib.import_module("src.utils")
         tm = util_mod.load_threat_model(model_dir)
@@ -1641,7 +1727,9 @@ def _tmdd_threat_prompt(ctx: dict) -> dict:
     output    = ctx.get("output", "threat_model_prompt.txt")
     try:
         import sys as _sys, importlib
-        _sys.path.insert(0, str(Path(model_dir).parent))
+        # src/generators/threat_prompt.py lives in tmdd-main/tmdd-main/
+        _TMDD_ROOT = Path(__file__).parent.parent / "tmdd-main" / "tmdd-main"
+        _sys.path.insert(0, str(_TMDD_ROOT))
         gen_mod  = importlib.import_module("src.generators.threat_prompt")
         util_mod = importlib.import_module("src.utils")
         tm = util_mod.load_threat_model(model_dir)
@@ -1659,19 +1747,35 @@ def _tmdd_threat_prompt(ctx: dict) -> dict:
         return _stub_result("tmdd.generate_threat_model_prompt", ctx, str(e))
 
 def _tmdd_diagram(ctx: dict) -> dict:
-    """Generate an interactive HTML threat model diagram (D3/Mermaid)."""
+    """Generate an interactive HTML threat model diagram via tmdd-main/diagram.py."""
     model_file = ctx.get("model_file", "threat_model.json")
     out        = ctx.get("output",     "threat_diagram.html")
+    # tmdd CLI has no "generate diagram" subcommand (only: init, lint, feature, compile).
+    # Use diagram.py from the embedded tmdd-main package directly.
+    _TMDD_ROOT = Path(__file__).parent.parent / "tmdd-main" / "tmdd-main"
     try:
-        r = _cli([_require("tmdd"), "generate", "diagram",
-                  "--input", model_file, "--output", out])
-        if r.returncode == 0 and Path(out).exists():
+        import sys as _sys
+        _sys.path.insert(0, str(_TMDD_ROOT))
+        import importlib
+        diag_mod = importlib.import_module("diagram")
+        # diagram.py exposes generate(input_path, output_path) or similar
+        if hasattr(diag_mod, "generate"):
+            diag_mod.generate(model_file, out)
+        elif hasattr(diag_mod, "main"):
+            import unittest.mock as _mock
+            with _mock.patch("sys.argv", ["diagram.py", model_file, "--output", out]):
+                diag_mod.main()
+        else:
+            raise AttributeError("diagram.py has no 'generate' or 'main' entry point")
+        if Path(out).exists():
             return {"diagram_file": out, "size_bytes": Path(out).stat().st_size}
-        # Fallback: generate a minimal Mermaid-based HTML
+        raise FileNotFoundError(f"diagram.py ran but {out} was not created")
+    except Exception:
+        # Fallback: generate a minimal Mermaid-based HTML from the JSON model
         try:
-            model = json.loads(Path(model_file).read_text())
+            model    = json.loads(Path(model_file).read_text())
         except Exception:
-            model = {}
+            model    = {}
         features = model.get("features", [])
         mermaid_nodes = "\n    ".join(
             f"{i}[{f.get('name','?')}]" for i, f in enumerate(features[:20])
@@ -1684,22 +1788,36 @@ def _tmdd_diagram(ctx: dict) -> dict:
 <script>mermaid.initialize({{startOnLoad:true}});</script>
 </body></html>"""
         Path(out).write_text(html)
-        return {"diagram_file": out, "format": "mermaid-html", "features": len(features)}
-    except Exception as e:
-        return _stub_result("tmdd.generate_diagram", ctx, str(e))
+        return {"diagram_file": out, "format": "mermaid-html-fallback",
+                "features": len(features)}
 
 
 def _tmdd_report(ctx: dict) -> dict:
-    """Generate an HTML/MD threat model report from TMDD output."""
+    """Generate an HTML/MD threat model report via tmdd-main/report.py."""
     model_file = ctx.get("model_file", "threat_model.json")
     fmt        = ctx.get("format",     "html")
     out        = ctx.get("output",     f"threat_report.{fmt}")
+    # tmdd CLI has no "generate report" subcommand (only: init, lint, feature, compile).
+    # Use report.py / report_md.py from the embedded tmdd-main package directly.
+    _TMDD_ROOT = Path(__file__).parent.parent / "tmdd-main" / "tmdd-main"
     try:
-        r = _cli([_require("tmdd"), "generate", "report",
-                  "--input", model_file, "--format", fmt, "--output", out])
-        if r.returncode == 0:
+        import sys as _sys, importlib
+        _sys.path.insert(0, str(_TMDD_ROOT))
+        mod_name = "report_md" if fmt == "md" else "report"
+        rep_mod  = importlib.import_module(mod_name)
+        if hasattr(rep_mod, "generate"):
+            rep_mod.generate(model_file, out)
+        elif hasattr(rep_mod, "main"):
+            import unittest.mock as _mock
+            with _mock.patch("sys.argv", [f"{mod_name}.py", model_file, "--output", out]):
+                rep_mod.main()
+        else:
+            raise AttributeError(f"{mod_name}.py has no 'generate' or 'main' entry point")
+        if Path(out).exists():
             return {"report_file": out}
-        # Fallback: structured MD report
+        raise FileNotFoundError(f"{mod_name}.py ran but {out} was not created")
+    except Exception:
+        # Fallback: structured Markdown report built directly from JSON
         try:
             model = json.loads(Path(model_file).read_text())
         except Exception:
@@ -1713,8 +1831,6 @@ def _tmdd_report(ctx: dict) -> dict:
         out_md = out if fmt == "md" else out.replace(".html", ".md")
         Path(out_md).write_text(md)
         return {"report_file": out_md, "format": "markdown-fallback"}
-    except Exception as e:
-        return _stub_result("tmdd.generate_report", ctx, str(e))
 
 
 def _tmdd_stub(name: str):
@@ -1733,8 +1849,162 @@ TMDD_HANDLERS = {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  12. SEMGREP
+#  11b. CODEGEN — Nexus Unified System bridge
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# Ce module est le câble entre nexus_compose et le générateur de code.
+# Flux : tmdd.generate_agent_prompt → agent_prompt.txt
+#                                    → codegen.unified_system
+#                                    → UnifiedSystem.run_task(instruction)
+#                                    → CODE_GENERATED → audit (Phase 7)
+#
+# Prérequis runtime :
+#   pip install -e unified_system/crewAI/ && pip install -e unified_system/OpenManus-RL/
+#   Variables d'environnement :
+#     OH_BASE_URL       URL du serveur OpenHands   (défaut: http://localhost:3000)
+#     OH_TOKEN          Bearer token OpenHands
+#     CREWAI_LLM_MODEL  Modèle crewAI              (défaut: gpt-4o-mini)
+#     OPENAI_API_KEY    Clé API OpenAI (forwarded à crewAI)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _codegen_unified(ctx: dict) -> dict:
+    """
+    Câble principal nexus_compose ↔ UnifiedSystem.
+
+    Lit le fichier agent_prompt.txt produit par tmdd.generate_agent_prompt
+    (via `tmdd compile`), puis appelle UnifiedSystem.run_task(instruction)
+    pour déclencher la génération de code via crewAI → OpenHands.
+
+    Paramètres ctx
+    --------------
+    prompt_file    : chemin vers agent_prompt.txt  (défaut: "agent_prompt.txt")
+    instruction    : texte brut à passer à run_task()  — alternatif à prompt_file
+    code_output    : répertoire cible du code généré    (défaut: "generated/")
+    oh_base_url    : URL OpenHands (surcharge OH_BASE_URL env)
+    oh_token       : token OpenHands (surcharge OH_TOKEN env)
+    crewai_model   : modèle crewAI (surcharge CREWAI_LLM_MODEL env)
+    dry_run        : si True, retourne le prompt sans appeler run_task()
+    feature_name   : nom de la feature à implémenter (ajouté au prompt si présent)
+
+    Retour ctx
+    ----------
+    generated_code : sortie brute de run_task()
+    code_path      : répertoire où le code a été écrit (sandbox OpenHands)
+    prompt_used    : texte du prompt envoyé
+    unified_system : {"health": {...}, "model": "..."}
+    """
+    prompt_file  = ctx.get("prompt_file",  "agent_prompt.txt")
+    instruction  = ctx.get("instruction",  "")
+    code_output  = ctx.get("code_output",  "generated/")
+    dry_run      = ctx.get("dry_run",      False)
+    feature_name = ctx.get("feature_name", "")
+
+    # ── 1. Résoudre l'instruction ──────────────────────────────────────────────
+    if not instruction:
+        try:
+            instruction = Path(prompt_file).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {
+                "error": f"agent_prompt.txt introuvable : {prompt_file}. "
+                         "Exécuter d'abord tmdd.generate_agent_prompt ou "
+                         "tmdd.tmdd_compile pour générer le prompt.",
+                "hint": "tmdd compile → écrit <feature>.prompt.txt dans .tmdd-output/",
+            }
+
+    if feature_name:
+        instruction = f"## Feature à implémenter : {feature_name}\n\n{instruction}"
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "prompt_used":    instruction,
+            "prompt_length":  len(instruction),
+            "note": "dry_run=True : UnifiedSystem.run_task() non appelé.",
+        }
+
+    # ── 2. Importer UnifiedSystem ──────────────────────────────────────────────
+    try:
+        # Support import depuis le package installé ou depuis le répertoire source
+        try:
+            from unified_system.bridge import UnifiedSystem, UnifiedSystemConfig
+        except ImportError:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent.parent))
+            # Path(__file__).parent.parent = Nexus Vibecoding/
+            # → unified_system/bridge.py is at Nexus Vibecoding/unified_system/bridge.py
+            from unified_system.bridge import UnifiedSystem, UnifiedSystemConfig
+
+    except ImportError as imp_err:
+        return {
+            "error": (
+                "unified_system non installé. "
+                "pip install -e unified_system/crewAI/ && "
+                "pip install -e unified_system/OpenManus-RL/"
+            ),
+            "import_error": str(imp_err),
+            "prompt_file":  prompt_file,
+            "prompt_used":  instruction[:200] + "..." if len(instruction) > 200 else instruction,
+        }
+
+    # ── 3. Configurer et instancier ────────────────────────────────────────────
+    import os
+    cfg = UnifiedSystemConfig(
+        openhands_base_url = ctx.get("oh_base_url",   os.getenv("OH_BASE_URL",       "http://localhost:3000")),
+        openhands_token    = ctx.get("oh_token",      os.getenv("OH_TOKEN",          "")),
+        crewai_llm_model   = ctx.get("crewai_model",  os.getenv("CREWAI_LLM_MODEL",  "gpt-4o-mini")),
+        crewai_verbose     = ctx.get("verbose",        False),
+    )
+    system = UnifiedSystem(config=cfg)
+
+    # ── 4. Health check avant exécution ───────────────────────────────────────
+    health = system.health_check()
+    if health.get("openhands", "").startswith("error"):
+        return {
+            "error":   "OpenHands inaccessible — démarrer le serveur OpenHands d'abord.",
+            "health":  health,
+            "oh_url":  cfg.openhands_base_url,
+            "hint":    "docker run -p 3000:3000 docker.all-hands.dev/all-hands-ai/openhands:latest",
+        }
+
+    # ── 5. Appel principal ─────────────────────────────────────────────────────
+    try:
+        result = system.run_task(instruction)
+    except Exception as run_err:
+        return {
+            "error":       f"UnifiedSystem.run_task() a échoué : {run_err}",
+            "health":      health,
+            "prompt_used": instruction[:300],
+        }
+
+    # ── 6. Localiser le code produit ───────────────────────────────────────────
+    # OpenHands écrit dans un répertoire sandbox ; tenter de retrouver le chemin
+    code_path = code_output
+    Path(code_path).mkdir(parents=True, exist_ok=True)
+    result_file = Path(code_path) / "unified_system_output.txt"
+    result_file.write_text(result, encoding="utf-8")
+
+    return {
+        "generated_code":   result,
+        "code_path":        str(Path(code_path).resolve()),
+        "result_file":      str(result_file),
+        "prompt_used":      instruction,
+        "prompt_length":    len(instruction),
+        "feature_name":     feature_name,
+        "unified_system":   {"health": health, "model": cfg.crewai_llm_model},
+    }
+
+
+CODEGEN_HANDLERS = {
+    "unified_system": _codegen_unified,
+}
+
+
+def _dispatch_codegen(node_id: str, ctx: dict) -> dict:
+    fn_name = node_id.split(".", 1)[-1]
+    handler = CODEGEN_HANDLERS.get(fn_name)
+    if handler:
+        return handler(ctx)
+    return _stub_result(node_id, ctx, "unknown codegen handler")
 
 def _sg_scan(ctx: dict) -> dict:
     target = ctx.get("target_path", ".")
@@ -1776,17 +2046,32 @@ def _sg_write_rule(ctx: dict) -> dict:
         }]
     }
     out = ctx.get("output", f"{rule_id}.yml")
-    import yaml  # type: ignore
-    with open(out, "w") as f:
-        yaml.dump(rule, f, default_flow_style=False)
-    return {"rule_file": out, "rule": rule}
+    try:
+        import yaml  # type: ignore
+        with open(out, "w") as f:
+            yaml.dump(rule, f, default_flow_style=False)
+        return {"rule_file": out, "rule": rule}
+    except ImportError:
+        # pyyaml absent — écriture en JSON avec extension .yml pour compatibilité
+        out_json = out if out.endswith(".json") else out.replace(".yml", ".json")
+        with open(out_json, "w") as f:
+            json.dump(rule, f, indent=2)
+        return {"rule_file": out_json, "rule": rule,
+                "warning": "pyyaml absent — fichier écrit en JSON (installer pyyaml pour YAML)"}
+    except Exception as e:
+        return _stub_result("semgrep.write_custom_semgrep_rule", ctx, str(e))
 
 def _sg_ast(ctx: dict) -> dict:
     target = ctx.get("file", "")
     lang   = ctx.get("language", "python")
     try:
-        r = _cli([_require("semgrep"), "--dump-ast", "--lang", lang, target])
-        return {"ast": r.stdout}
+        # semgrep >= 1.0: `semgrep ast` subcommand
+        r = _cli([_require("semgrep"), "ast", "--lang", lang, target])
+        if r.returncode == 0:
+            return {"ast": r.stdout}
+        # Fallback: legacy --dump-ast flag (semgrep < 1.0)
+        r2 = _cli([_require("semgrep"), "--dump-ast", "--lang", lang, target])
+        return {"ast": r2.stdout}
     except Exception as e:
         return _stub_result("semgrep.get_abstract_syntax_tree", ctx, str(e))
 
@@ -1946,17 +2231,24 @@ def _bearer_ignore(ctx: dict) -> dict:
 
 
 def _bearer_detectors(ctx: dict) -> dict:
-    """List detectors available for a given language."""
+    """List detectors available for a given language via 'bearer rules list'."""
     lang = ctx.get("language", "")
     try:
-        cmd = [_require("bearer"), "scan", "--format=json", "--dry-run",
-               "--scanner=secrets,privacy,dataflow"]
+        # bearer rules list --format=json  (--dry-run does not exist in bearer scan)
+        cmd = [_require("bearer"), "rules", "list", "--format=json"]
         if lang:
-            cmd += ["--lang", lang]
+            cmd += ["--language", lang]
         r = _cli(cmd)
-        return {"detectors": r.stdout.splitlines()[:50],
+        if r.returncode == 0:
+            try:
+                data = json.loads(r.stdout)
+                return {"detectors": data, "language": lang}
+            except json.JSONDecodeError:
+                return {"detectors": r.stdout.splitlines()[:50], "language": lang}
+        return {"detectors": [],
                 "language": lang,
-                "note": "Detectors auto-selected by Bearer based on file extensions."}
+                "note": "Detectors auto-selected by Bearer based on file extensions.",
+                "raw": r.stderr[:200]}
     except Exception as e:
         return _stub_result("bearer.detecteurs_par_langage_detec", ctx, str(e))
 
@@ -2089,6 +2381,7 @@ for _prefix, _hmap in [
     ("pytm",    PYTM_HANDLERS),
     ("neo4j",   NEO4J_HANDLERS),
     ("tmdd",    TMDD_HANDLERS),
+    ("codegen", CODEGEN_HANDLERS),   # ← Nexus Unified System bridge
     ("semgrep", SEMGREP_HANDLERS),
     ("bearer",  BEARER_HANDLERS),
     ("codeql",  CODEQL_HANDLERS),
