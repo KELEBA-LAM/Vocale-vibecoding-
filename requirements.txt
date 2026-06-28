@@ -1,0 +1,85 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# requirements.txt — Nexus Compose / Vocal Vibecoding Factory
+# Repo : https://github.com/KELEBA-LAM/Vocale-vibecoding-
+# Python : >=3.11
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# INSTALL (tout) :
+#   pip install -r requirements.txt
+#
+# INSTALL (sélectif, ex. seulement Neo4j + Semgrep) :
+#   pip install neo4j semgrep
+#
+# OUTILS CLI (non-pip, à installer séparément) :
+#   likec4        →  npm install -g @likec4/cli
+#   dotnet        →  https://dotnet.microsoft.com  (pour C4InterFlow)
+#   structurizr   →  https://github.com/structurizr/cli  (JAR Java)
+#   containerlab  →  https://containerlab.dev/install/  (binaire Go)
+#   opa           →  https://www.openpolicyagent.org/docs/latest/#running-opa
+#   bearer        →  https://docs.bearer.com/reference/installation/
+#   codeql        →  https://github.com/github/codeql-cli-binaries
+#   leon          →  npm install  (https://github.com/leon-ai/leon)
+#   tmdd          →  https://github.com/attasec/tmdd  (binaire CLI)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── PHASE 1 : CO-CONCEPTION ───────────────────────────────────────────────────
+# Query2Diagram — LLM engine (openai) + package Python
+openai>=1.0.0
+# query2diagram n'est pas sur PyPI → installer depuis GitHub :
+#   pip install git+https://github.com/i-need-a-pencil/query2diagram.git
+
+
+# ── PHASE 2 : ARCHITECTURE C4 ────────────────────────────────────────────────
+# LikeC4    → CLI Node.js (npm install -g @likec4/cli) — aucune dépendance pip
+# C4InterFlow → dotnet CLI — aucune dépendance pip
+# Structurizr DSL → structurizr-cli JAR — aucune dépendance pip
+
+
+# ── PHASE 3 : INFRASTRUCTURE & RÉSEAU ────────────────────────────────────────
+# Containerlab → binaire Go — aucune dépendance pip
+# Jinja2 est utilisé dans drivers.py pour le rendu des templates Containerlab
+Jinja2>=3.0.0
+PyYAML>=6.0.0
+
+# Open Policy Agent → binaire Go — aucune dépendance pip
+# Batfish → pybatfish (SDK Python officiel)
+pybatfish>=2024.1.0
+
+
+# ── PHASE 4 : MODÉLISATION DES MENACES ───────────────────────────────────────
+# OWASP Threat Dragon → API REST (drivers.py utilise requests)
+requests>=2.31.0
+
+# OWASP pytm — Threat Modeling as Code
+pytm>=1.3.0
+
+
+# ── PHASE 5 : KNOWLEDGE GRAPH ────────────────────────────────────────────────
+# Neo4j — driver Python officiel
+neo4j>=5.0.0
+
+# TMDD → binaire CLI — aucune dépendance pip
+
+
+# ── PHASE 6 : GÉNÉRATION DE CODE ─────────────────────────────────────────────
+# Leon → assistant vocal Node.js — aucune dépendance pip
+# Cursor / Claude Code → outils externes
+
+
+# ── PHASE 7 : AUDIT DU CODE ──────────────────────────────────────────────────
+# Semgrep — disponible à la fois comme CLI ET comme package pip
+semgrep>=1.45.0
+
+# Bearer → binaire CLI — aucune dépendance pip
+# CodeQL → codeql-cli binaire — aucune dépendance pip
+
+
+# ── UTILITAIRES TRANSVERSES ───────────────────────────────────────────────────
+# Utilisés dans drivers.py pour la sérialisation/désérialisation
+# (json, subprocess, pathlib, logging, shutil → stdlib Python, aucun pip)
+
+
+# ── DEV / TESTS ───────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-timeout>=2.3.0
