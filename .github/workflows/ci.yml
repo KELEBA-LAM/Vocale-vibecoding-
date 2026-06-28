@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/nexus-compose
+  DOCKER_IMAGE: ghcr.io/keleba-lam/nexus-compose
   PYTHON_VERSION: "3.11"
 
 jobs:
@@ -116,7 +116,7 @@ jobs:
       - name: Installer Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Installer LikeC4 CLI
         run: npm install -g @likec4/cli
