@@ -198,11 +198,40 @@ jobs:
             *.log
 
 
+
+  # ── JOB 4 : CODEQL SCAN (action officielle GitHub) ────────────────────────
+  # CodeQL est géré ici et non dans le Dockerfile (bundle trop lourd ~2.5GB)
+  codeql:
+    name: 🔍 CodeQL Scan
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Initialiser CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Auto-build
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyser avec CodeQL
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+
   # ── JOB 3 : DEPLOY ────────────────────────────────────────────────────────
   deploy:
     name: 🚀 Deploy
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: [build, test, codeql]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
