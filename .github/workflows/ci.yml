@@ -184,8 +184,13 @@ jobs:
           cd /opt/leon
           # FIX: esbuild a besoin de son postinstall
           echo 'onlyBuiltDependencies[] = esbuild' >> .npmrc
-          # FIX: --omit=dev (--prod déprécié depuis pnpm v7)
-          pnpm install --omit=dev
+          # FIX: --prod (pas --omit=dev, qui est la syntaxe npm — pnpm n'a pas
+          # d'option --omit, il renvoie "Unknown option: 'omit'". --prod n'est
+          # PAS déprécié en pnpm, c'est bien le flag actuel, vérifié pnpm v9/v11)
+          # --config.runtimeOnFail=ignore : garde-fou si le package.json de
+          # Leon réintroduit un jour un devEngines.runtime avec onFail:"error"
+          # (cf. Dockerfile pour le détail du bug — même cause racine ici).
+          pnpm install --prod --config.runtimeOnFail=ignore
 
       # ── .NET ────────────────────────────────────────────────────────────
       - name: Setup .NET SDK 8
