@@ -17,6 +17,18 @@ env:
   NODE_VERSION: "24"
   PNPM_VERSION: "9"            # LTS stable — pas "latest" pour la reproductibilité
 
+# ── FIX : permissions globales déclarées ──────────────────────────────────────
+# Sans packages:write, GITHUB_TOKEN ne peut pas créer un package GHCR.
+# Erreur observée : "denied: installation not allowed to Create organization
+# package" — confirmé dans la trace du dernier build (les 28/28 étapes de
+# construction passent, seul le push final échoue, faute de permission).
+# KELEBA-LAM est une Organization GitHub : si ce bloc ne suffit pas,
+# vérifier aussi Organization → Settings → Packages → "Package creation"
+# (peut bloquer GITHUB_TOKEN même avec packages:write dans le workflow).
+permissions:
+  contents: read
+  packages: write
+
 
 jobs:
 
