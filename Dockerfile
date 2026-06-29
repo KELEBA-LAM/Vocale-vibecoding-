@@ -121,7 +121,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 FROM python-deps AS leon
 
 # ════════════════════════════════════════════════════════════════════════════
-# FIX : --config.runtimeOnFail=ignore
+# FIX : PNPM_CONFIG_RUNTIME_ON_FAIL=ignore (+ --config.runtimeOnFail en ceinture)
 # ════════════════════════════════════════════════════════════════════════════
 # Cause racine (lue dans package.json de Leon) :
 #
@@ -138,16 +138,21 @@ FROM python-deps AS leon
 #           specify a version range
 # avec onFail:"error" → exit 1 avant d'installer un seul paquet.
 #
-# ATTENTION : le message d'erreur de pnpm suggère "--runtime-on-fail=ignore"
-# mais CE FLAG N'EXISTE PAS dans le CLI (testé sur pnpm v9.15.9 et v11.9.0,
-# erreur "Unknown option: 'runtime-on-fail'"). "runtimeOnFail" n'est qu'un
-# nom de clé de config (pnpm-workspace.yaml / env var), pas un flag kebab-case
-# direct. La bonne syntaxe CLI passe par le mécanisme générique --config.<clé> :
-#   --config.runtimeOnFail=ignore
-# → pnpm continue l'installation sans tenir compte du check devEngines.runtime.
-# Ce flag est un no-op inoffensif si Leon n'a plus de devEngines (cas actuel
-# en amont), donc robuste dans les deux cas.
+# Round 1 (résolu) : "--runtime-on-fail=ignore" suggéré par pnpm dans son
+# propre message n'est pas un vrai flag CLI → remplacé par --config.runtimeOnFail=ignore.
+#
+# Round 2 (ce fix) : --config.runtimeOnFail=ignore ne couvre que CETTE
+# invocation de pnpm install. Or le script postinstall de Leon télécharge SA
+# PROPRE copie de pnpm et relance un `pnpm rebuild better-sqlite3` en
+# sous-processus (execa) — ce sous-process ne voit jamais notre flag CLI et
+# refait le même check devEngines, d'où le exit 1 plus loin dans le build.
+# Le code de Leon (RuntimeHelper.getManagedNodeEnvironment()) propage en
+# revanche tout process.env au sous-process. Donc seule une VARIABLE
+# D'ENVIRONNEMENT traverse les deux niveaux — testé et confirmé : le flag CLI
+# échoue côté nested, la variable d'env réussit aux deux niveaux.
 # ════════════════════════════════════════════════════════════════════════════
+ENV PNPM_CONFIG_RUNTIME_ON_FAIL=ignore
+
 RUN git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon \
     && cd /opt/leon \
     && pnpm install --config.runtimeOnFail=ignore
