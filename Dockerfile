@@ -121,7 +121,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 FROM python-deps AS leon
 
 # ════════════════════════════════════════════════════════════════════════════
-# FIX : --runtime-on-fail=ignore
+# FIX : --config.runtimeOnFail=ignore
 # ════════════════════════════════════════════════════════════════════════════
 # Cause racine (lue dans package.json de Leon) :
 #
@@ -138,13 +138,19 @@ FROM python-deps AS leon
 #           specify a version range
 # avec onFail:"error" → exit 1 avant d'installer un seul paquet.
 #
-# Flag exact suggéré par pnpm dans le message d'erreur :
-#   --runtime-on-fail=ignore
-# → pnpm continue l'installation sans tenir compte du check devEngines.runtime
+# ATTENTION : le message d'erreur de pnpm suggère "--runtime-on-fail=ignore"
+# mais CE FLAG N'EXISTE PAS dans le CLI (testé sur pnpm v9.15.9 et v11.9.0,
+# erreur "Unknown option: 'runtime-on-fail'"). "runtimeOnFail" n'est qu'un
+# nom de clé de config (pnpm-workspace.yaml / env var), pas un flag kebab-case
+# direct. La bonne syntaxe CLI passe par le mécanisme générique --config.<clé> :
+#   --config.runtimeOnFail=ignore
+# → pnpm continue l'installation sans tenir compte du check devEngines.runtime.
+# Ce flag est un no-op inoffensif si Leon n'a plus de devEngines (cas actuel
+# en amont), donc robuste dans les deux cas.
 # ════════════════════════════════════════════════════════════════════════════
 RUN git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon \
     && cd /opt/leon \
-    && pnpm install --runtime-on-fail=ignore
+    && pnpm install --config.runtimeOnFail=ignore
 
 ENV LEON_PATH="/opt/leon"
 
