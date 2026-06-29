@@ -179,6 +179,11 @@ jobs:
 
       # Leon : installé via pnpm (son package.json est pnpm-aware)
       - name: Installer Leon AI
+        env:
+          # cf. Dockerfile pour le détail : le postinstall de Leon relance sa
+          # propre copie de pnpm en sous-process (pnpm rebuild better-sqlite3),
+          # qui ne lit pas --config.* mais hérite des variables d'env.
+          PNPM_CONFIG_RUNTIME_ON_FAIL: ignore
         run: |
           git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon
           cd /opt/leon
@@ -187,9 +192,8 @@ jobs:
           # FIX: --prod (pas --omit=dev, qui est la syntaxe npm — pnpm n'a pas
           # d'option --omit, il renvoie "Unknown option: 'omit'". --prod n'est
           # PAS déprécié en pnpm, c'est bien le flag actuel, vérifié pnpm v9/v11)
-          # --config.runtimeOnFail=ignore : garde-fou si le package.json de
-          # Leon réintroduit un jour un devEngines.runtime avec onFail:"error"
-          # (cf. Dockerfile pour le détail du bug — même cause racine ici).
+          # --config.runtimeOnFail=ignore : couvre cette invocation directe ;
+          # la variable d'env ci-dessus couvre le sous-process postinstall.
           pnpm install --prod --config.runtimeOnFail=ignore
 
       # ── .NET ────────────────────────────────────────────────────────────
