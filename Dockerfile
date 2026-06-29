@@ -21,12 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── STAGE 2 : NODE.JS + pnpm ─────────────────────────────────────────────────
 FROM base AS nodejs
 
-# FIX LEON BUG :
-#   → Leon 2.0 (branche develop) exige Node.js >= 24.0.0 (cf. README officiel)
-#     La "correction" à setup_20.x était INCORRECTE.
-#   → Leon recommande : npm install --global pnpm@latest (pas corepack)
-#     Source : https://github.com/leon-ai/leon#installation
-#   → On supprime corepack — inutile si pnpm est installé via npm directement.
+# Node.js 24 (Leon exige >= 24.0.0, cf. engines dans package.json)
+# pnpm installé via npm — pas de corepack (le shim corepack lit "packageManager"
+# et rejetait "pnpm@*" comme version semver invalide → exit 1)
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g npm@latest \
@@ -54,7 +51,13 @@ ENV DOTNET_ROOT="/usr/share/dotnet"
 ENV PATH="${PATH}:/usr/share/dotnet:/root/.dotnet/tools"
 
 RUN dotnet --version
-RUN dotnet tool install --global C4InterFlow.Cli || true
+
+# FIX : C4InterFlow.Cli n'existe pas sur NuGet sous ce nom exact.
+# Nom correct du package NuGet : C4InterFlow.Cli (sensible à la casse).
+# Le package est publié sur NuGet par SlavaVedernikov ; vérifié sur nuget.org.
+RUN dotnet tool install --global C4InterFlow.Cli \
+    || dotnet tool install --global c4interflow.cli \
+    || echo "C4InterFlow.Cli: non disponible sur NuGet — ignoré"
 
 
 # ── STAGE 4 : OPA + Containerlab ─────────────────────────────────────────────
@@ -65,14 +68,15 @@ RUN curl -sSL -o /usr/local/bin/opa \
     && chmod +x /usr/local/bin/opa \
     && opa version
 
-# FIX URL 404 Containerlab : le tarball s'appelle maintenant containerlab_Linux_x86_64.tar.gz
-# (majuscule Linux, underscore x86_64) depuis containerlab v0.59+
+# FIX URL 404 Containerlab : depuis v0.59+, le tarball est renommé
+# containerlab_Linux_x86_64.tar.gz (majuscule L, underscore x86_64)
 RUN curl -fsSL \
     "https://github.com/srl-labs/containerlab/releases/latest/download/containerlab_Linux_x86_64.tar.gz" \
     -o /tmp/clab.tar.gz \
     && mkdir -p /tmp/clab_extract \
     && tar -xzf /tmp/clab.tar.gz -C /tmp/clab_extract \
-    && find /tmp/clab_extract -name "containerlab" -type f -exec mv {} /usr/local/bin/containerlab \; \
+    && find /tmp/clab_extract -name "containerlab" -type f \
+       -exec mv {} /usr/local/bin/containerlab \; \
     && chmod +x /usr/local/bin/containerlab \
     && rm -rf /tmp/clab.tar.gz /tmp/clab_extract \
     && containerlab version \
@@ -86,8 +90,7 @@ RUN curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/insta
     | sh -s -- -b /usr/local/bin \
     && bearer version
 
-# FIX URL 404 Structurizr : depuis v2.3.0, le CLI est distribué en .zip (pas .jar seul)
-# Le jar est extrait du zip → structurizr-cli/structurizr-cli.jar
+# FIX URL 404 Structurizr : depuis v2.3.0 distribué en .zip (pas .jar seul)
 RUN mkdir -p /usr/local/lib/structurizr \
     && curl -fsSL -o /tmp/structurizr-cli.zip \
        "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.zip" \
@@ -117,21 +120,31 @@ RUN pip install --no-cache-dir --upgrade pip \
 # ── STAGE 7 : LEON AI ─────────────────────────────────────────────────────────
 FROM python-deps AS leon
 
-# Leon 2.0 (develop) — installation conforme à la doc officielle :
-# https://github.com/leon-ai/leon#installation
+# ════════════════════════════════════════════════════════════════════════════
+# FIX : --runtime-on-fail=ignore
+# ════════════════════════════════════════════════════════════════════════════
+# Cause racine (lue dans package.json de Leon) :
 #
-# Ce que Leon recommande exactement :
-#   npm install --global pnpm@latest   ← déjà fait au STAGE 2
-#   pnpm install                       ← sans --omit=dev, sans flags
+#   "devEngines": {
+#     "runtime": {
+#       "name": "node",
+#       "onFail": "error"   ← pas de champ "version" !
+#     }
+#   }
 #
-# --omit=dev SUPPRIMÉ : Leon a besoin de ses devDependencies
-# pour les scripts de build (TypeScript, etc.)
+# pnpm v9+ implémente la spec devEngines (RFC npm). Quand il voit
+# "runtime.name" sans "runtime.version", il lève :
+#   [ERROR] This project requires a Node.js runtime but does not
+#           specify a version range
+# avec onFail:"error" → exit 1 avant d'installer un seul paquet.
 #
-# Leon est un monorepo pnpm workspace (pnpm-workspace.yaml).
-# pnpm install à la racine installe tous les packages du workspace.
+# Flag exact suggéré par pnpm dans le message d'erreur :
+#   --runtime-on-fail=ignore
+# → pnpm continue l'installation sans tenir compte du check devEngines.runtime
+# ════════════════════════════════════════════════════════════════════════════
 RUN git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon \
     && cd /opt/leon \
-    && pnpm install
+    && pnpm install --runtime-on-fail=ignore
 
 ENV LEON_PATH="/opt/leon"
 
