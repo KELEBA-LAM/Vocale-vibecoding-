@@ -259,6 +259,13 @@ jobs:
           done
 
       # ── Tests ─────────────────────────────────────────────────────────────
+      # FIX CRITIQUE : les tests vivent dans test/, pas à la racine du dépôt.
+      # Avant ce correctif, `pytest test_nexus_compose.py` échouait
+      # immédiatement avec "file or directory not found" — 0 test collecté,
+      # le job `test` échouait à coup sûr, et comme `deploy` déclare
+      # `needs: [build, test, codeql]`, AUCUN déploiement ne pouvait jamais
+      # réussir via ce workflow. `pytest test/` exécute tout le dossier
+      # (test_nexus_compose.py + test_nexus_compose_v2.py).
       - name: Lancer les tests pytest
         env:
           NEO4J_URI: bolt://localhost:7687
@@ -269,7 +276,7 @@ jobs:
           BATFISH_HOST: localhost
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest test_nexus_compose.py \
+          pytest test/ \
             --timeout=120 \
             --tb=short \
             -v
