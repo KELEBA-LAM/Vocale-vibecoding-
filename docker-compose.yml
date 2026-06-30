@@ -18,6 +18,18 @@ services:
     container_name: nexus-compose
     restart: unless-stopped
     privileged: true
+    # FIX : le CMD par défaut du Dockerfile ("python -m nexus_compose", sans
+    # sous-commande) plante immédiatement — argparse déclare `cmd` comme
+    # required=True (cf. nexus_compose/__main__.py). Combiné à
+    # `restart: unless-stopped`, le conteneur crash-loopait en boucle dès
+    # `docker compose up`. Ce service est un outil CLI/orchestrateur, pas un
+    # serveur HTTP (EXPOSE 8080 dans le Dockerfile est vestigial — rien
+    # n'écoute sur ce port dans le code). L'usage documenté en tête de ce
+    # fichier ("docker compose run app pytest") suppose un conteneur qui
+    # reste vivant pour des invocations ponctuelles via `run`/`exec` — même
+    # principe que le service `leon` ci-dessous, qui override déjà sa propre
+    # commande pour la même raison.
+    command: ["tail", "-f", "/dev/null"]
     environment:
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
