@@ -38,10 +38,14 @@ def orch(G) -> Orchestrator:
 class TestGraphIntegrity:
 
     def test_node_count(self, G):
-        assert G.node_count == 158, f"Expected 158 nodes, got {G.node_count}"
+        # NOTE (corrigé) : la valeur d'origine (158) datait d'avant la mise à
+        # jour du parseur nodes.json (→168) ET d'avant le correctif registry.py
+        # qui enregistre le nœud "codegen.unified_system", orphelin jusque-là
+        # (→169). Cf. TestRegressions dans test_nexus_compose_v2.py.
+        assert G.node_count == 169, f"Expected 169 nodes, got {G.node_count}"
 
     def test_edge_count(self, G):
-        assert G.edge_count == 197, f"Expected 197 edges, got {G.edge_count}"
+        assert G.edge_count == 218, f"Expected 218 edges, got {G.edge_count}"
 
     def test_virtual_nodes_present(self, G):
         for vid in ["LEON", "CODEBASE", "CODE_GENERATED", "REPORT", "PRODUCTION"]:
@@ -126,7 +130,8 @@ class TestNodeMeta:
 
     def test_real_nodes_not_virtual(self, G):
         real = [n for n in G.nodes() if not n.meta.virtual]
-        assert len(real) == 153
+        # 169 nœuds totaux - 5 virtuels (LEON/CODEBASE/CODE_GENERATED/REPORT/PRODUCTION)
+        assert len(real) == 164
 
     def test_node_io_fields_present(self, G):
         empty_io = [n.meta.id for n in G.nodes()
@@ -168,8 +173,8 @@ class TestStubExecution:
 
     def test_dry_run_covers_all_nodes(self, orch):
         report = orch.dry_run()
-        assert len(report.nodes) == 158
-        assert report.live_count + report.stub_count == 158
+        assert len(report.nodes) == 169
+        assert report.live_count + report.stub_count == 169
 
     def test_dry_run_phase_filter(self, orch):
         report = orch.dry_run(orch.G.list_nodes(phase="audit"))
