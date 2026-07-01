@@ -1,118 +1,87 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # Dockerfile — Nexus Compose / Vocal Vibecoding Factory
 #
-# ARCHITECTURE MULTI-STAGE (offline-first, depuis les zips bundlés) :
+# STRATÉGIE DES BINAIRES EXTERNES :
 #
-#   go-builder   → compile opa, bearer, containerlab depuis source locale
-#   dotnet-build → compile C4InterFlow.Cli depuis source locale
-#   base         → Python 3.11 + system packages (apt)
+#   OPA / Bearer / Containerlab / Structurizr → binaires pré-compilés officiels
+#     Les zips sources (opa.zip, bearer.zip, etc.) sont destinés à bootstrap.sh
+#     (développement local sans Docker). Les compiler dans Docker nécessiterait
+#     de télécharger tous les modules Go depuis internet (go.sum) et épuise la
+#     RAM du runner CI (~7 GB) quand les stages tournent en parallèle.
+#     Résultats observés : exit code 1 (cmd/opa introuvable en OPA v2.x) et
+#     exit code 137 (OOM Kill sur dotnet-build + base concurrent).
+#
+#   C4InterFlow.Cli → installé via dotnet tool (NuGet), pas de build source
+#
+#   Python (pytm, q2d, tmdd, crewAI, OpenHands, OpenManus-RL) → zips bundlés ✓
+#   Leon AI → zip bundlé ✓  (seuls vrais gains offline)
+#
+# STAGES :
+#   binaries     → télécharge OPA, Bearer, Containerlab, C4InterFlow, Structurizr
+#   base         → Python 3.11 + paquets système (sans JRE — installé dans binaries)
 #   nodejs       → Node.js 24 + pnpm
-#   go-tools     → copie les binaires Go compilés + dotnet SDK
-#   binaries     → ajoute les binaires pre-built / fallback
-#   python-deps  → installe pytm, q2d, tmdd, crewAI, OpenHands depuis zips
-#   leon         → extrait Leon AI depuis zip (plus de git clone)
-#   final        → assemblage de tout + nexus_compose
-#
-# Pré-requis : scripts/bootstrap.sh OU disposer des zips dans le repo.
+#   tools        → assemble binaires + Node
+#   python-deps  → pytm, q2d, tmdd depuis zips locaux + semgrep PyPI
+#   unified-deps → crewAI, OpenHands, OpenManus-RL depuis zips locaux
+#   leon         → Leon AI depuis zip local (plus de git clone)
+#   final        → assemblage + nexus_compose
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STAGE 0a — Go builder : OPA + Bearer + Containerlab depuis sources locales
+# STAGE 0 — Binaires externes (pré-compilés, séquentiels pour économiser la RAM)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FROM golang:1.25-alpine AS go-builder
+FROM debian:12-slim AS binaries
 
-RUN apk add --no-cache git make bash gcc musl-dev
-
-WORKDIR /build
-
-# ── OPA ───────────────────────────────────────────────────────────────────────
-COPY opa.zip ./
-RUN unzip -q opa.zip \
-    && mv opa-main/opa-main opa-src \
-    && cd opa-src \
-    && go build -o /out/opa ./cmd/opa \
-    && /out/opa version \
-    && echo "OPA compilé depuis source locale ✓"
-
-# ── Bearer ────────────────────────────────────────────────────────────────────
-COPY bearer.zip ./
-RUN unzip -q bearer.zip \
-    && mv bearer-main/bearer-main bearer-src \
-    && cd bearer-src \
-    && CGO_ENABLED=0 go build -o /out/bearer main.go \
-    && /out/bearer version \
-    && echo "Bearer compilé depuis source locale ✓"
-
-# ── Containerlab ──────────────────────────────────────────────────────────────
-COPY containerlab.zip ./
-RUN unzip -q containerlab.zip \
-    && mv containerlab-main/containerlab-main clab-src \
-    && cd clab-src \
-    && CGO_ENABLED=0 go build -o /out/containerlab main.go 2>/dev/null \
-       || CGO_ENABLED=0 go build -o /out/containerlab . \
-    && chmod +x /out/containerlab \
-    && echo "Containerlab compilé depuis source locale ✓"
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STAGE 0b — .NET builder : C4InterFlow.Cli depuis source locale
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dotnet-build
-
-# FIX : l'image dotnet/sdk:8.0 ne contient pas unzip par défaut.
-# Sans ce apt-get, `unzip -q C4InterFlow.zip` retourne exit code 127
-# (command not found) et fait échouer tout le stage.
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates unzip \
+    default-jre-headless \
+    dotnet-sdk-8.0 2>/dev/null || apt-get install -y --no-install-recommends wget \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
-
-COPY C4InterFlow.zip ./
-
-# FIX : créer /out/c4interflow AVANT la tentative de build.
-# Sans ce mkdir, si dotnet publish échoue (réseau NuGet, dépendances
-# manquantes…), le répertoire n'existe pas. Le stage suivant fait
-# COPY --from=dotnet-build /out/c4interflow ... et BuildKit plante avec
-# "/out/c4interflow": not found — même si l'erreur a été silenciée par ||.
-# Avec mkdir, le dossier existe toujours ; les stages suivants vérifient
-# le fichier binaire C4InterFlow.Cli avant de créer le symlink.
-RUN mkdir -p /out/c4interflow \
-    && unzip -q C4InterFlow.zip -d /tmp/c4if_src \
-    && C4IF_PROJ=$(find /tmp/c4if_src -name "C4InterFlow.Cli.csproj" | head -1) \
-    && if [ -n "$C4IF_PROJ" ]; then \
-         dotnet publish "$C4IF_PROJ" \
-           -c Release \
-           -r linux-x64 \
-           --self-contained true \
-           -o /out/c4interflow \
-         && echo "C4InterFlow.Cli compilé depuis source locale ✓" \
-         || echo "C4InterFlow.Cli: compilation échouée (NuGet/réseau) — placeholder vide conservé"; \
-       else \
-         echo "C4InterFlow.Cli.csproj introuvable dans le zip — placeholder vide conservé"; \
-       fi
-
-# ── Structurizr CLI (téléchargé depuis GitHub Releases) ──────────────────────
-# FIX : même principe que dotnet-build — créer le fichier destination avant
-# la tentative, pour que COPY --from=structurizr-build réussisse toujours.
-# Un fichier vide (0 octet) sert de placeholder ; le stage tools vérifie
-# la taille avec [[ -s ... ]] avant d'installer le wrapper shell.
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS structurizr-build
-
-# curl + unzip nécessaires (absents de dotnet/sdk:8.0 par défaut)
-RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates unzip \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /out \
-    && touch /out/structurizr-cli.jar \
+RUN mkdir -p /out/bin /out/lib
+
+# ── OPA (binaire statique officiel) ───────────────────────────────────────────
+RUN curl -sSfL -o /out/bin/opa \
+    "https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static" \
+    && chmod +x /out/bin/opa \
+    && /out/bin/opa version \
+    && echo "OPA ✓"
+
+# ── Bearer (binaire officiel) ─────────────────────────────────────────────────
+RUN curl -sfL "https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh" \
+    | sh -s -- -b /out/bin \
+    && /out/bin/bearer version \
+    && echo "Bearer ✓"
+
+# ── Containerlab (binaire officiel) ───────────────────────────────────────────
+RUN curl -sfL "https://get.containerlab.dev" | BINDIR=/out/bin sh \
+    && echo "Containerlab ✓" \
+    || echo "Containerlab: non disponible (réseau)"
+
+# ── C4InterFlow (dotnet tool depuis NuGet) ─────────────────────────────────────
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh | bash -s -- --version 8.0 \
+        --install-dir /out/dotnet \
+    && /out/dotnet/dotnet tool install --tool-path /out/bin C4InterFlow.Cli \
+    && /out/bin/c4interflow --version \
+    && echo "C4InterFlow.Cli ✓" \
+    || echo "C4InterFlow.Cli: non disponible (NuGet)"
+
+# ── Structurizr CLI (jar officiel) ───────────────────────────────────────────
+RUN mkdir -p /out/lib/structurizr \
+    && touch /out/lib/structurizr/structurizr-cli.jar \
     && curl -fsSL -o /tmp/structurizr.zip \
        "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.zip" \
     && unzip -q /tmp/structurizr.zip -d /tmp/structurizr \
-    && find /tmp/structurizr -name "*.jar" | head -1 | xargs -I{} cp {} /out/structurizr-cli.jar \
+    && find /tmp/structurizr -name "*.jar" | head -1 \
+       | xargs -I{} cp {} /out/lib/structurizr/structurizr-cli.jar \
     && rm -rf /tmp/structurizr.zip /tmp/structurizr \
-    && echo "Structurizr CLI installé ✓" \
-    || echo "Structurizr: téléchargement échoué — placeholder vide conservé"
-
+    && echo "Structurizr CLI ✓" \
+    || echo "Structurizr: non disponible (réseau)"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # STAGE 1 — Base système Python
@@ -149,48 +118,45 @@ ENV PATH="${PNPM_HOME}:${PATH}"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STAGE 3 — Binaires compilés (Go + .NET + Structurizr)
+# STAGE 3 — Assemblage : Node.js + binaires externes
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FROM nodejs AS tools
 
-# Binaires Go (compilés depuis sources locales en stage 0a)
-COPY --from=go-builder /out/opa          /usr/local/bin/opa
-COPY --from=go-builder /out/bearer       /usr/local/bin/bearer
-COPY --from=go-builder /out/containerlab /usr/local/bin/containerlab
+# Copie des binaires depuis le stage `binaries` (un seul COPY par outil)
+COPY --from=binaries /out/bin/opa          /usr/local/bin/opa
+COPY --from=binaries /out/bin/bearer       /usr/local/bin/bearer
 
-# .NET — C4InterFlow.Cli (compilé depuis zip local en stage 0b)
-# Le dossier /out/c4interflow existe toujours (mkdir garanti dans dotnet-build),
-# mais peut être vide si dotnet publish a échoué → on vérifie [[ -s ... ]].
-COPY --from=dotnet-build /out/c4interflow /usr/local/lib/c4interflow
-RUN if [[ -s /usr/local/lib/c4interflow/C4InterFlow.Cli ]]; then \
-      chmod +x /usr/local/lib/c4interflow/C4InterFlow.Cli \
-      && ln -sf /usr/local/lib/c4interflow/C4InterFlow.Cli /usr/local/bin/c4interflow \
-      && echo "C4InterFlow.Cli installé depuis source locale ✓"; \
+# Containerlab — optionnel (peut être absent si téléchargement échoué)
+COPY --from=binaries /out/bin /tmp/external_bin
+RUN if [[ -s /tmp/external_bin/containerlab ]]; then \
+      cp /tmp/external_bin/containerlab /usr/local/bin/containerlab \
+      && chmod +x /usr/local/bin/containerlab \
+      && echo "Containerlab ✓"; \
     else \
-      echo "C4InterFlow.Cli: binaire absent (build échoué) — outil non disponible"; \
-    fi
+      echo "Containerlab: non disponible"; \
+    fi \
+    && rm -rf /tmp/external_bin
 
-# Structurizr CLI
-# FIX : `COPY ... 2>/dev/null || true` est une syntaxe SHELL invalide dans
-# un Dockerfile — Docker la parse comme un chemin de destination littéral.
-# La source /out/structurizr-cli.jar existe toujours dans structurizr-build
-# (touch garanti), mais peut être vide (0 octet) si le téléchargement a échoué.
-# On vérifie [[ -s ... ]] (non-vide) avant d'installer le wrapper.
+# C4InterFlow — optionnel (dotnet tool depuis NuGet dans stage binaries)
+RUN if [[ -f /tmp/c4if/c4interflow ]]; then \
+      cp /tmp/c4if/c4interflow /usr/local/bin/c4interflow && chmod +x /usr/local/bin/c4interflow; \
+    fi 2>/dev/null || true
+
+# Structurizr — copie du jar (peut être un placeholder vide si réseau KO)
 RUN mkdir -p /usr/local/lib/structurizr
-COPY --from=structurizr-build /out/structurizr-cli.jar /usr/local/lib/structurizr/structurizr-cli.jar
+COPY --from=binaries /out/lib/structurizr/structurizr-cli.jar \
+     /usr/local/lib/structurizr/structurizr-cli.jar
 RUN if [[ -s /usr/local/lib/structurizr/structurizr-cli.jar ]]; then \
       printf '#!/bin/bash\njava -jar /usr/local/lib/structurizr/structurizr-cli.jar "$@"\n' \
         > /usr/local/bin/structurizr \
       && chmod +x /usr/local/bin/structurizr \
-      && echo "Structurizr CLI installé ✓"; \
+      && echo "Structurizr ✓"; \
     else \
-      echo "Structurizr CLI: jar absent (téléchargement échoué) — outil non disponible"; \
+      echo "Structurizr: non disponible"; \
     fi
 
-# Validation rapide des binaires Go (toujours disponibles car compilés localement)
-RUN opa version \
-    && bearer version \
-    && containerlab version 2>/dev/null || echo "containerlab: runtime privilegié requis"
+# Validation (OPA et Bearer sont toujours disponibles — statiques et robustes)
+RUN opa version && bearer version
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
