@@ -63,30 +63,48 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dotnet-build
 WORKDIR /build
 
 COPY C4InterFlow.zip ./
-RUN unzip -q C4InterFlow.zip \
-    && mv C4InterFlow-master/C4InterFlow-master c4if-src \
-    && cd c4if-src \
-    && dotnet publish C4InterFlow.Cli/C4InterFlow.Cli.csproj \
-         -c Release \
-         -r linux-x64 \
-         --self-contained true \
-         -o /out/c4interflow \
-    && echo "C4InterFlow.Cli compilé depuis source locale ✓" \
-    || echo "C4InterFlow.Cli: compilation échouée — sera ignoré"
 
-# ── Wrapper shell pour structurizr-cli (téléchargé si build C4IF OK) ──────────
+# FIX : créer /out/c4interflow AVANT la tentative de build.
+# Sans ce mkdir, si dotnet publish échoue (réseau NuGet, dépendances
+# manquantes…), le répertoire n'existe pas. Le stage suivant fait
+# COPY --from=dotnet-build /out/c4interflow ... et BuildKit plante avec
+# "/out/c4interflow": not found — même si l'erreur a été silenciée par ||.
+# Avec mkdir, le dossier existe toujours ; les stages suivants vérifient
+# le fichier binaire C4InterFlow.Cli avant de créer le symlink.
+RUN mkdir -p /out/c4interflow \
+    && unzip -q C4InterFlow.zip -d /tmp/c4if_src \
+    && C4IF_PROJ=$(find /tmp/c4if_src -name "C4InterFlow.Cli.csproj" | head -1) \
+    && if [ -n "$C4IF_PROJ" ]; then \
+         dotnet publish "$C4IF_PROJ" \
+           -c Release \
+           -r linux-x64 \
+           --self-contained true \
+           -o /out/c4interflow \
+         && echo "C4InterFlow.Cli compilé depuis source locale ✓" \
+         || echo "C4InterFlow.Cli: compilation échouée (NuGet/réseau) — placeholder vide conservé"; \
+       else \
+         echo "C4InterFlow.Cli.csproj introuvable dans le zip — placeholder vide conservé"; \
+       fi
+
+# ── Structurizr CLI (téléchargé depuis GitHub Releases) ──────────────────────
+# FIX : même principe que dotnet-build — créer le fichier destination avant
+# la tentative, pour que COPY --from=structurizr-build réussisse toujours.
+# Un fichier vide (0 octet) sert de placeholder ; le stage tools vérifie
+# la taille avec [[ -s ... ]] avant d'installer le wrapper shell.
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS structurizr-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /out \
+    && touch /out/structurizr-cli.jar \
     && curl -fsSL -o /tmp/structurizr.zip \
        "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.zip" \
     && unzip -q /tmp/structurizr.zip -d /tmp/structurizr \
     && find /tmp/structurizr -name "*.jar" | head -1 | xargs -I{} cp {} /out/structurizr-cli.jar \
     && rm -rf /tmp/structurizr.zip /tmp/structurizr \
-    || echo "Structurizr: téléchargement échoué — sera ignoré"
+    && echo "Structurizr CLI installé ✓" \
+    || echo "Structurizr: téléchargement échoué — placeholder vide conservé"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -133,29 +151,36 @@ COPY --from=go-builder /out/opa          /usr/local/bin/opa
 COPY --from=go-builder /out/bearer       /usr/local/bin/bearer
 COPY --from=go-builder /out/containerlab /usr/local/bin/containerlab
 
-# .NET runtime (pour lancer C4InterFlow.Cli auto-contenu)
+# .NET — C4InterFlow.Cli (compilé depuis zip local en stage 0b)
+# Le dossier /out/c4interflow existe toujours (mkdir garanti dans dotnet-build),
+# mais peut être vide si dotnet publish a échoué → on vérifie [[ -s ... ]].
 COPY --from=dotnet-build /out/c4interflow /usr/local/lib/c4interflow
-RUN if [[ -f /usr/local/lib/c4interflow/C4InterFlow.Cli ]]; then \
-      ln -s /usr/local/lib/c4interflow/C4InterFlow.Cli /usr/local/bin/c4interflow \
-      && echo "C4InterFlow.Cli installé ✓"; \
+RUN if [[ -s /usr/local/lib/c4interflow/C4InterFlow.Cli ]]; then \
+      chmod +x /usr/local/lib/c4interflow/C4InterFlow.Cli \
+      && ln -sf /usr/local/lib/c4interflow/C4InterFlow.Cli /usr/local/bin/c4interflow \
+      && echo "C4InterFlow.Cli installé depuis source locale ✓"; \
     else \
-      # Fallback : dotnet tool install depuis NuGet
-      DOTNET_ROOT=/usr/share/dotnet PATH="$PATH:/root/.dotnet/tools" \
-      dotnet tool install --global C4InterFlow.Cli 2>/dev/null \
-      || echo "C4InterFlow.Cli non disponible"; \
+      echo "C4InterFlow.Cli: binaire absent (build échoué) — outil non disponible"; \
     fi
 
-# Structurizr (téléchargé en stage 0b)
+# Structurizr CLI
+# FIX : `COPY ... 2>/dev/null || true` est une syntaxe SHELL invalide dans
+# un Dockerfile — Docker la parse comme un chemin de destination littéral.
+# La source /out/structurizr-cli.jar existe toujours dans structurizr-build
+# (touch garanti), mais peut être vide (0 octet) si le téléchargement a échoué.
+# On vérifie [[ -s ... ]] (non-vide) avant d'installer le wrapper.
 RUN mkdir -p /usr/local/lib/structurizr
-COPY --from=structurizr-build /out/structurizr-cli.jar /usr/local/lib/structurizr/ 2>/dev/null || true
-RUN if [[ -f /usr/local/lib/structurizr/structurizr-cli.jar ]]; then \
+COPY --from=structurizr-build /out/structurizr-cli.jar /usr/local/lib/structurizr/structurizr-cli.jar
+RUN if [[ -s /usr/local/lib/structurizr/structurizr-cli.jar ]]; then \
       printf '#!/bin/bash\njava -jar /usr/local/lib/structurizr/structurizr-cli.jar "$@"\n' \
         > /usr/local/bin/structurizr \
       && chmod +x /usr/local/bin/structurizr \
-      && echo "Structurizr installé ✓"; \
+      && echo "Structurizr CLI installé ✓"; \
+    else \
+      echo "Structurizr CLI: jar absent (téléchargement échoué) — outil non disponible"; \
     fi
 
-# Validation rapide
+# Validation rapide des binaires Go (toujours disponibles car compilés localement)
 RUN opa version \
     && bearer version \
     && containerlab version 2>/dev/null || echo "containerlab: runtime privilegié requis"
