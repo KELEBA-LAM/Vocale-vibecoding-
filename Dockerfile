@@ -238,16 +238,23 @@ FROM unified-deps AS leon
 # (cf. commentaire original dans l'ancienne stage LEON)
 ENV PNPM_CONFIG_RUNTIME_ON_FAIL=ignore
 
-COPY "Leon AI.zip" /tmp/
+# NOTE : syntaxe JSON array obligatoire pour les noms de fichiers avec espaces.
+# `COPY "Leon AI.zip" /tmp/` provoque l'erreur :
+#   unexpected end of statement while looking for matching double-quote
+# Le parseur Dockerfile ne gère pas les espaces via quotes shell — seul le
+# tableau JSON le fait correctement.
+COPY ["Leon AI.zip", "/tmp/leon_ai.zip"]
 RUN echo "Extraction Leon AI depuis zip local..." \
-    && unzip -q "/tmp/Leon AI.zip" -d /tmp/leon_src \
+    && unzip -q /tmp/leon_ai.zip -d /tmp/leon_src \
     && LEON_INNER=$(find /tmp/leon_src -maxdepth 2 -mindepth 1 -type d -name "leon-develop" | head -1) \
-    && [[ -n "$LEON_INNER" ]] \
-       && cp -r "$LEON_INNER" /opt/leon \
-       || cp -r /tmp/leon_src/$(ls /tmp/leon_src | head -1) /opt/leon \
+    && if [[ -n "$LEON_INNER" ]]; then \
+         cp -r "$LEON_INNER" /opt/leon; \
+       else \
+         cp -r /tmp/leon_src/$(ls /tmp/leon_src | head -1) /opt/leon; \
+       fi \
     && cd /opt/leon \
     && pnpm install --config.runtimeOnFail=ignore \
-    && rm -rf "/tmp/Leon AI.zip" /tmp/leon_src \
+    && rm -rf /tmp/leon_ai.zip /tmp/leon_src \
     && echo "Leon AI installé depuis source locale ✓"
 
 ENV LEON_PATH="/opt/leon"
