@@ -38,13 +38,12 @@ def orch(G) -> Orchestrator:
 class TestGraphIntegrity:
 
     def test_node_count(self, G):
-        # NOTE (corrigé) : la valeur d'origine (158) datait d'avant la mise à
-        # jour du parseur nodes.json (→168) ET d'avant le correctif registry.py
-        # qui enregistre le nœud "codegen.unified_system", orphelin jusque-là
-        # (→169). Cf. TestRegressions dans test_nexus_compose_v2.py.
+        # 164 parsed nodes (163 tool nodes + codegen.unified_system) + 5 virtual
         assert G.node_count == 169, f"Expected 169 nodes, got {G.node_count}"
 
     def test_edge_count(self, G):
+        # 216 original edges + 2 new (tmdd.generate_agent_prompt→codegen.unified_system,
+        # codegen.unified_system→CODE_GENERATED)
         assert G.edge_count == 218, f"Expected 218 edges, got {G.edge_count}"
 
     def test_virtual_nodes_present(self, G):
@@ -53,7 +52,8 @@ class TestGraphIntegrity:
 
     def test_all_modules_present(self, G):
         expected = {"q2d","likec4","c4if","struct","clab","opa","bf",
-                    "td","pytm","neo4j","tmdd","semgrep","bearer","codeql","virtual"}
+                    "td","pytm","neo4j","tmdd","semgrep","bearer","codeql",
+                    "codegen","virtual"}
         found = {n.meta.module for n in G.nodes()}
         assert expected <= found, f"Missing modules: {expected - found}"
 
@@ -129,8 +129,8 @@ class TestNodeMeta:
             assert G.node(vid).meta.virtual is True
 
     def test_real_nodes_not_virtual(self, G):
+        # 163 tool nodes + 1 codegen.unified_system bridge = 164 real nodes
         real = [n for n in G.nodes() if not n.meta.virtual]
-        # 169 nœuds totaux - 5 virtuels (LEON/CODEBASE/CODE_GENERATED/REPORT/PRODUCTION)
         assert len(real) == 164
 
     def test_node_io_fields_present(self, G):

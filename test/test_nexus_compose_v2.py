@@ -114,16 +114,28 @@ class TestGraphIntegrity:
 
     def test_graph_size_drift_detector(self, G):
         """
-        Valeur exacte au moment de l'écriture de ce test (après le correctif
-        registry.py qui enregistre codegen.unified_system).
+        Valeur exacte après homogénéisation des fichiers uploadés (2026-07-01) :
+          • nodes.json : 164 nœuds (163 outils tiers + 1 codegen.unified_system)
+          • VIRTUAL_DEFS : 5 nœuds (LEON, CODEBASE, CODE_GENERATED, REPORT, PRODUCTION)
+          • EDGE_CATALOGUE : 218 arêtes
+          → Total : 169 nœuds, 218 arêtes.
 
-        Si ce test échoue après un changement DÉLIBÉRÉ du graphe (ajout/retrait
-        d'un nœud ou d'une arête), mettez à jour les deux constantes ci-dessous
-        dans le même commit — ce test existe justement pour forcer cette
-        mise à jour consciente plutôt qu'un drift silencieux.
+        codegen.unified_system est dans nodes.json (module="codegen") —
+        plus dans EXTRA_DEFS. registry.py utilise `all_raw = VIRTUAL_DEFS + raw_nodes`.
+
+        Si ce test échoue après un changement DÉLIBÉRÉ, mettez à jour
+        les deux constantes ci-dessous dans le même commit.
         """
         EXPECTED_NODE_COUNT = 169
         EXPECTED_EDGE_COUNT = 218
+        assert G.node_count == EXPECTED_NODE_COUNT, (
+            f"node_count a dérivé : attendu {EXPECTED_NODE_COUNT}, obtenu {G.node_count}. "
+            "Si ce changement est voulu, mettez à jour EXPECTED_NODE_COUNT."
+        )
+        assert G.edge_count == EXPECTED_EDGE_COUNT, (
+            f"edge_count a dérivé : attendu {EXPECTED_EDGE_COUNT}, obtenu {G.edge_count}. "
+            "Si ce changement est voulu, mettez à jour EXPECTED_EDGE_COUNT."
+        )
         assert G.node_count == EXPECTED_NODE_COUNT, (
             f"node_count a dérivé : attendu {EXPECTED_NODE_COUNT}, obtenu {G.node_count}. "
             "Si ce changement est voulu, mettez à jour EXPECTED_NODE_COUNT."
@@ -139,8 +151,11 @@ class TestGraphIntegrity:
         assert len(real) == G.node_count - 5
 
     def test_all_modules_present(self, G):
+        # "codegen" ajouté car codegen.unified_system est maintenant dans nodes.json
+        # (module="codegen") — plus dans EXTRA_DEFS.
         expected = {"q2d", "likec4", "c4if", "struct", "clab", "opa", "bf",
-                    "td", "pytm", "neo4j", "tmdd", "semgrep", "bearer", "codeql", "virtual"}
+                    "td", "pytm", "neo4j", "tmdd", "semgrep", "bearer", "codeql",
+                    "codegen", "virtual"}
         found = {n.meta.module for n in G.nodes()}
         assert expected <= found, f"Modules manquants : {expected - found}"
 
@@ -990,17 +1005,22 @@ class TestRegressions:
 
     def test_codegen_unified_system_node_is_registered(self, G):
         """
-        BUG (avant correctif registry.py) : drivers.py expose un handler
-        live pour 'codegen.unified_system' (CODEGEN_HANDLERS / ALL_HANDLERS),
-        mais aucun Node correspondant n'était jamais enregistré dans le
-        graphe — ni via nodes.json (outil non catalogué), ni via
-        VIRTUAL_DEFS. G.node('codegen.unified_system') levait KeyError
-        à tous les coups.
+        BUG (corrigé) : drivers.py expose un handler live pour
+        'codegen.unified_system' (CODEGEN_HANDLERS["unified_system"]) et
+        orchestrator.py le référence dans deux presets, mais aucun Node
+        n'était enregistré dans le graphe — ni dans nodes.json ni via
+        VIRTUAL_DEFS.
+
+        FIX (v2) : codegen.unified_system est maintenant dans nodes.json
+        avec module="codegen", function="unified_system". Le handler drivers.py
+        est résolu via ALL_HANDLERS["codegen.unified_system"]. Plus besoin
+        d'EXTRA_DEFS dans registry.py.
         """
         n = G.node("codegen.unified_system")  # ne doit pas lever KeyError
         assert n is not None
-        assert n.is_live, "codegen.unified_system a un handler dans drivers.ALL_HANDLERS"
+        assert n.is_live, "codegen.unified_system doit avoir un handler live depuis drivers.CODEGEN_HANDLERS"
         assert n.meta.virtual is False
+        assert n.meta.module == "codegen"
 
     def test_codegen_unified_system_is_wired_into_graph(self, G):
         """Le nœud doit être atteignable depuis LEON et alimenter CODE_GENERATED."""
