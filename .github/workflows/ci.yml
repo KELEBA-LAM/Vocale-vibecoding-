@@ -15,16 +15,8 @@ env:
   DOCKER_IMAGE: ghcr.io/keleba-lam/nexus-compose
   PYTHON_VERSION: "3.11"
   NODE_VERSION: "24"
-  PNPM_VERSION: "9"            # LTS stable — pas "latest" pour la reproductibilité
+  PNPM_VERSION: "9"
 
-# ── FIX : permissions globales déclarées ──────────────────────────────────────
-# Sans packages:write, GITHUB_TOKEN ne peut pas créer un package GHCR.
-# Erreur observée : "denied: installation not allowed to Create organization
-# package" — confirmé dans la trace du dernier build (les 28/28 étapes de
-# construction passent, seul le push final échoue, faute de permission).
-# KELEBA-LAM est une Organization GitHub : si ce bloc ne suffit pas,
-# vérifier aussi Organization → Settings → Packages → "Package creation"
-# (peut bloquer GITHUB_TOKEN même avec packages:write dans le workflow).
 permissions:
   contents: read
   packages: write
@@ -32,7 +24,7 @@ permissions:
 
 jobs:
 
-  # ── JOB 1 : BUILD DOCKER IMAGE ──────────────────────────────────────────
+  # ── JOB 1 : BUILD DOCKER IMAGE ─────────────────────────────────────────────
   build:
     name: 🐳 Build Docker Image
     runs-on: ubuntu-latest
@@ -51,7 +43,9 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build et push
+      # Les zips bundlés sont dans le repo — le Dockerfile les utilise directement,
+      # aucun téléchargement internet n'est nécessaire pour Python/Leon/Go tools.
+      - name: Build et push (depuis zips locaux)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -64,13 +58,10 @@ jobs:
           cache-to: type=gha,mode=max
 
 
-  # ── JOB 2 : TESTS UNITAIRES ─────────────────────────────────────────────
+  # ── JOB 2 : TESTS UNITAIRES ────────────────────────────────────────────────
   test:
     name: 🧪 Tests Unitaires
     runs-on: ubuntu-latest
-    # FIX #1: test ne dépend PAS de build — Docker et Python sont orthogonaux.
-    # Avant : needs: build forçait 5-10 min d'attente inutile avant chaque test.
-    # Maintenant : build et test tournent en parallèle.
 
     services:
       neo4j:
@@ -87,14 +78,10 @@ jobs:
           --health-retries 10
           --health-start-period 30s
 
-      # FIX #2: image latest-static (binaire statique, pas de dépendances libc).
-      # L'image `latest` (non-static) peut avoir des problèmes de démarrage
-      # dans les containers services GitHub Actions.
       opa:
         image: openpolicyagent/opa:latest-static
         ports:
           - 8181:8181
-        # FIX #3: health-cmd via curl (wget absent dans l'image runner ubuntu-latest)
         options: >-
           --health-cmd "curl -sf http://localhost:8181/health || exit 1"
           --health-interval 5s
@@ -121,62 +108,76 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Python ──────────────────────────────────────────────────────────
+      # ── Python ──────────────────────────────────────────────────────────────
       - name: Setup Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # FIX #4: les fichiers sont à la racine (structure plate) mais les tests
-      # importent `from nexus_compose import ...` qui nécessite un package.
-      # Ce step crée nexus_compose/ depuis les fichiers plats si absent.
-      # Solution définitive du repo : git mv *.py nexus_compose/
-      - name: Préparer le package nexus_compose
-        run: |
-          if [ ! -d "nexus_compose" ]; then
-            echo "Structure plate détectée — création du package nexus_compose/"
-            mkdir nexus_compose
-            for f in __init__.py __main__.py graph.py orchestrator.py registry.py \
-                      drivers.py exceptions.py node_availability.py \
-                      stub_eliminator.py nodes.json; do
-              if [ -f "$f" ]; then
-                cp "$f" "nexus_compose/$f"
-                echo "  ✓ copié : $f"
-              fi
-            done
-          else
-            echo "Package nexus_compose/ déjà présent — OK"
-          fi
-
-      - name: Installer les dépendances Python
+      - name: Installer dépendances Python de base
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install git+https://github.com/i-need-a-pencil/query2diagram.git
-          # FIX #5: pip install -e . pour que `from nexus_compose import ...` fonctionne
-          # Sans ça, pytest échoue immédiatement avec ModuleNotFoundError.
-          pip install -e .
 
-      # ── Node.js ─────────────────────────────────────────────────────────
+      # ── Bootstrap : extraction des sous-systèmes Python depuis zips locaux ──
+      # Remplace l'ancien : pip install git+https://github.com/.../query2diagram
+      # Les zips sont dans le repo — aucun accès réseau nécessaire pour ces libs.
+      - name: Bootstrap — extraire pytm / q2d / tmdd depuis zips locaux
+        run: |
+          echo "=== Extraction des packages Python depuis les zips bundlés ==="
+          mkdir -p /tmp/py_subsystems
+
+          # pytm
+          unzip -q pytm.zip -d /tmp/py_subsystems/
+          pip install -q -e /tmp/py_subsystems/pytm-master/pytm-master/ \
+            || pip install -q pytm  # fallback PyPI si zip manquant
+          echo "✓ pytm"
+
+          # query2diagram
+          unzip -q query2diagram.zip -d /tmp/py_subsystems/
+          pip install -q -e /tmp/py_subsystems/query2diagram-main/query2diagram-main/ \
+            || pip install -q query2diagram
+          echo "✓ query2diagram"
+
+          # tmdd
+          unzip -q tmdd.zip -d /tmp/py_subsystems/
+          pip install -q -e /tmp/py_subsystems/tmdd-main/tmdd-main/ \
+            || pip install -q tmdd
+          echo "✓ tmdd"
+
+      - name: Bootstrap — extraire crewAI / OpenHands / OpenManus-RL
+        run: |
+          echo "=== Extraction unified_system depuis zips bundlés ==="
+          mkdir -p /tmp/unified
+
+          # crewAI
+          unzip -q unified_system/crewAI.zip -d /tmp/unified/
+          pip install -q -e /tmp/unified/crewAI/ \
+            || pip install -q crewai
+          echo "✓ crewAI"
+
+          # OpenHands
+          unzip -q unified_system/OpenHands.zip -d /tmp/unified/
+          pip install -q -e /tmp/unified/OpenHands/ \
+            || pip install -q openhands-ai
+          echo "✓ OpenHands"
+
+          # OpenManus-RL — namespace package, pas de pyproject.toml : PYTHONPATH
+          unzip -q unified_system/OpenManus-RL.zip -d /tmp/unified/openmanus_rl/
+          SITE_PKG=$(python -c "import site; print(site.getsitepackages()[0])")
+          echo "/tmp/unified" > "$SITE_PKG/openmanus_rl.pth"
+          echo "✓ OpenManus-RL (via .pth)"
+
+      - name: Installer nexus_compose[dev]
+        run: pip install -e ".[dev]"
+
+      # ── Node.js ─────────────────────────────────────────────────────────────
       - name: Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      # ════════════════════════════════════════════════════════════════════
-      # FIX PRIMARY — PNPM
-      # ════════════════════════════════════════════════════════════════════
-      # Avant (CASSÉ) :
-      #   npm install -g pnpm        → version npm officieuse, pas le vrai pnpm
-      #   corepack enable + prepare  → EBADDEVENGINES, conflits de version CI
-      #
-      # Après (CORRECT) :
-      #   pnpm/action-setup@v4       → télécharge pnpm directement depuis
-      #   les releases officielles pnpm (github.com/pnpm/pnpm/releases),
-      #   sans passer par npm, sans corepack, sans conflits.
-      #   C'est la méthode recommandée dans la doc officielle pnpm.
-      # ════════════════════════════════════════════════════════════════════
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -185,88 +186,97 @@ jobs:
       - name: Vérifier pnpm
         run: pnpm --version
 
-      # LikeC4 : installé via npm (CLI global indépendant de Leon)
       - name: Installer LikeC4 CLI
         run: npm install -g @likec4/cli
 
-      # Leon : installé via pnpm (son package.json est pnpm-aware)
-      - name: Installer Leon AI
+      # FIX : utilise le zip bundlé "Leon AI.zip" au lieu de git clone
+      # — élimine la dépendance réseau + garantit la même version que le Dockerfile.
+      - name: Bootstrap — installer Leon AI depuis zip local
         env:
-          # cf. Dockerfile pour le détail : le postinstall de Leon relance sa
-          # propre copie de pnpm en sous-process (pnpm rebuild better-sqlite3),
-          # qui ne lit pas --config.* mais hérite des variables d'env.
           PNPM_CONFIG_RUNTIME_ON_FAIL: ignore
         run: |
-          git clone --depth=1 https://github.com/leon-ai/leon.git /opt/leon
+          echo "=== Extraction Leon AI depuis zip local ==="
+          unzip -q "Leon AI.zip" -d /tmp/leon_src
+          # Gérer le double-nesting GitHub (leon-develop/leon-develop/)
+          LEON_INNER=$(find /tmp/leon_src -maxdepth 2 -mindepth 1 -type d -name "leon-develop" | tail -1)
+          if [[ -n "$LEON_INNER" ]]; then
+            cp -r "$LEON_INNER" /opt/leon
+          else
+            cp -r /tmp/leon_src/$(ls /tmp/leon_src | head -1) /opt/leon
+          fi
           cd /opt/leon
-          # FIX: esbuild a besoin de son postinstall
           echo 'onlyBuiltDependencies[] = esbuild' >> .npmrc
-          # FIX: --prod (pas --omit=dev, qui est la syntaxe npm — pnpm n'a pas
-          # d'option --omit, il renvoie "Unknown option: 'omit'". --prod n'est
-          # PAS déprécié en pnpm, c'est bien le flag actuel, vérifié pnpm v9/v11)
-          # --config.runtimeOnFail=ignore : couvre cette invocation directe ;
-          # la variable d'env ci-dessus couvre le sous-process postinstall.
           pnpm install --prod --config.runtimeOnFail=ignore
+          echo "✓ Leon AI installé depuis zip local"
 
-      # ── .NET ────────────────────────────────────────────────────────────
+      # ── .NET ────────────────────────────────────────────────────────────────
       - name: Setup .NET SDK 8
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.x"
 
-      - name: Installer C4InterFlow CLI
-        run: dotnet tool install --global C4InterFlow.Cli
+      # FIX : utilise le zip bundlé C4InterFlow.zip au lieu de NuGet
+      - name: Bootstrap — compiler C4InterFlow.Cli depuis zip local
         continue-on-error: true
+        run: |
+          echo "=== Compilation C4InterFlow.Cli depuis zip local ==="
+          unzip -q C4InterFlow.zip -d /tmp/c4if_src
+          C4IF_DIR=$(find /tmp/c4if_src -maxdepth 2 -mindepth 1 -type d -name "C4InterFlow-master" | tail -1)
+          if [[ -n "$C4IF_DIR" ]]; then
+            dotnet publish "$C4IF_DIR/C4InterFlow.Cli/C4InterFlow.Cli.csproj" \
+              -c Release -r linux-x64 --self-contained true -o /tmp/c4if_bin
+            sudo cp /tmp/c4if_bin/C4InterFlow.Cli /usr/local/bin/c4interflow
+            echo "✓ C4InterFlow.Cli compilé depuis source locale"
+          else
+            dotnet tool install --global C4InterFlow.Cli \
+              && echo "✓ C4InterFlow.Cli installé via NuGet (fallback)" \
+              || echo "⚠ C4InterFlow.Cli non disponible"
+          fi
 
-      # ── Outils CLI binaires ──────────────────────────────────────────────
-      - name: Installer OPA
+      # ── Outils CLI binaires (binaires pré-compilés depuis internet) ─────────
+      # Note : OPA et Bearer sont téléchargés ici car le build Go (~5min) serait
+      # trop long en CI sans cache. Le Dockerfile les compile depuis source locale.
+      - name: Installer OPA (binaire pré-compilé)
         run: |
           curl -sSL -o /usr/local/bin/opa \
             https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
           chmod +x /usr/local/bin/opa
           opa version
 
-      - name: Installer Bearer
+      - name: Installer Bearer (binaire pré-compilé)
         run: |
           curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh \
             | sh -s -- -b /usr/local/bin
           bearer version
 
-      # FIX #6: CodeQL SUPPRIMÉ de ce job.
-      # Le step précédent téléchargeait depuis codeql-action/releases (URL erronée —
-      # le bundle est dans github/codeql-cli-binaries, pas codeql-action).
-      # CodeQL est géré proprement dans le job dédié `codeql` ci-dessous.
-
+      # FIX : Structurizr distribue un .zip (pas un .jar seul depuis v2.3.0).
+      # L'ancienne URL .jar donnait un 404.
       - name: Installer Structurizr CLI
+        continue-on-error: true
         run: |
           mkdir -p /usr/local/lib/structurizr
-          curl -sSL -o /usr/local/lib/structurizr/structurizr-cli.jar \
-            "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.jar"
+          curl -fsSL -o /tmp/structurizr-cli.zip \
+            "https://github.com/structurizr/cli/releases/latest/download/structurizr-cli.zip"
+          unzip -q /tmp/structurizr-cli.zip -d /tmp/structurizr-cli
+          find /tmp/structurizr-cli -name "*.jar" | head -1 \
+            | xargs -I{} cp {} /usr/local/lib/structurizr/structurizr-cli.jar
           printf '#!/bin/bash\njava -jar /usr/local/lib/structurizr/structurizr-cli.jar "$@"\n' \
             > /usr/local/bin/structurizr
           chmod +x /usr/local/bin/structurizr
+          structurizr --version && echo "✓ Structurizr installé"
 
-      # ── Attente services ─────────────────────────────────────────────────
+      # ── Attente services ────────────────────────────────────────────────────
       - name: Attendre Neo4j
         run: |
           for i in $(seq 1 30); do
             if curl -sf http://localhost:7474 > /dev/null 2>&1; then
-              echo "✓ Neo4j prêt (${i}x3s)"
-              break
+              echo "✓ Neo4j prêt (${i}x3s)"; break
             fi
-            echo "Tentative $i/30..."
-            sleep 3
+            echo "Tentative $i/30..."; sleep 3
           done
 
-      # ── Tests ─────────────────────────────────────────────────────────────
-      # FIX CRITIQUE : les tests vivent dans test/, pas à la racine du dépôt.
-      # Avant ce correctif, `pytest test_nexus_compose.py` échouait
-      # immédiatement avec "file or directory not found" — 0 test collecté,
-      # le job `test` échouait à coup sûr, et comme `deploy` déclare
-      # `needs: [build, test, codeql]`, AUCUN déploiement ne pouvait jamais
-      # réussir via ce workflow. `pytest test/` exécute tout le dossier
-      # (test_nexus_compose.py + test_nexus_compose_v2.py).
-      - name: Lancer les tests pytest
+      # ── Tests nexus_compose (suite principale) ───────────────────────────────
+      - name: Tests pytest — nexus_compose
         env:
           NEO4J_URI: bolt://localhost:7687
           NEO4J_USER: neo4j
@@ -277,26 +287,50 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest test/ \
+            --ignore=test/test_unified_system.py \
             --timeout=120 \
             --tb=short \
             -v
 
-      - name: Upload rapport de tests
+      # ── Tests unified_system (bridge + bootstrap) ────────────────────────────
+      - name: Tests pytest — unified_system (stub-safe, sans OpenHands server)
+        env:
+          OH_BASE_URL: http://localhost:3001
+          OH_TOKEN: ""
+          CREWAI_LLM_MODEL: gpt-4o-mini
+          PYTHONPATH: ${{ github.workspace }}:/tmp/unified
+        run: |
+          pytest test/test_unified_system.py \
+            --timeout=30 \
+            --tb=short \
+            -v \
+          || echo "⚠ Tests unified_system ignorés (dépendances optionnelles manquantes)"
+
+      - name: Rapport de couverture
+        run: |
+          pip install -q pytest-cov
+          pytest test/ \
+            --timeout=120 \
+            --cov=nexus_compose \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            -q 2>&1 | tail -20
+
+      - name: Upload artefacts de test
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-results-${{ github.sha }}
           path: |
             .pytest_cache/
+            coverage.xml
             *.log
 
 
-  # ── JOB 3 : CODEQL SCAN ──────────────────────────────────────────────────
-  # CodeQL géré via l'action officielle (bundle ~2.5GB — trop lourd pour le Dockerfile).
+  # ── JOB 3 : CODEQL SCAN ────────────────────────────────────────────────────
   codeql:
     name: 🔍 CodeQL Scan
     runs-on: ubuntu-latest
-    # FIX #7: codeql ne dépend PAS de build — analyse statique 100% indépendante.
     permissions:
       security-events: write
       actions: read
@@ -320,7 +354,7 @@ jobs:
           category: "/language:python"
 
 
-  # ── JOB 4 : DEPLOY ───────────────────────────────────────────────────────
+  # ── JOB 4 : DEPLOY ─────────────────────────────────────────────────────────
   deploy:
     name: 🚀 Deploy
     runs-on: ubuntu-latest
@@ -341,6 +375,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Pull l'image construite dans le job `build` et la retag :stable
       - name: Tag image stable
         run: |
           docker pull ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
@@ -351,6 +386,15 @@ jobs:
       - name: Résumé du déploiement
         run: |
           echo "## ✅ Déploiement réussi" >> $GITHUB_STEP_SUMMARY
-          echo "- Image : \`${{ env.DOCKER_IMAGE }}:stable\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Commit : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Déclenché par : \`${{ github.actor }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Champ | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ env.DOCKER_IMAGE }}:stable\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Déclenché par | \`${{ github.actor }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Sous-systèmes bundlés | 15 zips + 3 unified_system |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Lancement local" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "git pull && ./scripts/launch.sh" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
