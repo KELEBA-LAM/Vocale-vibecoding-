@@ -210,13 +210,15 @@ RUN unzip -q /tmp/crewAI.zip -d /tmp/crewai_src \
        || pip install --no-cache-dir crewai \
     && rm -rf /tmp/crewAI.zip /tmp/crewai_src
 
-# ── OpenHands depuis zip local ────────────────────────────────────────────────
-COPY unified_system/OpenHands.zip /tmp/OpenHands.zip
-RUN unzip -q /tmp/OpenHands.zip -d /tmp/oh_src \
-    && OH_DIR=$(find /tmp/oh_src -maxdepth 1 -mindepth 1 -type d | head -1) \
-    && pip install --no-cache-dir -e "$OH_DIR" \
-       || pip install --no-cache-dir openhands-ai \
-    && rm -rf /tmp/OpenHands.zip /tmp/oh_src
+# ── OpenHands — PAS de pip install dans cette image ──────────────────────────
+# OpenHands est un SERVEUR AUTONOME (conteneur Docker séparé défini dans
+# docker-compose.yml, service `openhands`, profile `fullstack`).
+# bridge.py lui parle via son API HTTP (OH_BASE_URL) — pas d'import Python.
+# Tenter pip install openhands ici échoue car :
+#   1. Le package PyPI s'appelle "openhands" mais a des dépendances massives
+#      (PyTorch, GPU libs…) incompatibles avec cette image légère.
+#   2. Le zip contient le code source du serveur, pas un client léger.
+# Le zip est gardé dans le repo pour référence / déploiement bare-metal.
 
 # ── OpenManus-RL depuis zip local — namespace package, PYTHONPATH ─────────────
 COPY unified_system/OpenManus-RL.zip /tmp/OpenManus-RL.zip
