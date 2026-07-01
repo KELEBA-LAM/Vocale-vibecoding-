@@ -60,6 +60,12 @@ RUN unzip -q containerlab.zip \
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dotnet-build
 
+# FIX : l'image dotnet/sdk:8.0 ne contient pas unzip par défaut.
+# Sans ce apt-get, `unzip -q C4InterFlow.zip` retourne exit code 127
+# (command not found) et fait échouer tout le stage.
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build
 
 COPY C4InterFlow.zip ./
@@ -93,6 +99,7 @@ RUN mkdir -p /out/c4interflow \
 # la taille avec [[ -s ... ]] avant d'installer le wrapper shell.
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS structurizr-build
 
+# curl + unzip nécessaires (absents de dotnet/sdk:8.0 par défaut)
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -228,29 +235,28 @@ FROM python-deps AS unified-deps
 WORKDIR /app
 
 # ── crewAI depuis zip local ───────────────────────────────────────────────────
-COPY unified_system/crewAI.zip /tmp/
-RUN unzip -q /tmp/unified_system/crewAI.zip -d /tmp/crewai_src 2>/dev/null \
-    || unzip -q /tmp/crewAI.zip -d /tmp/crewai_src \
+# COPY unified_system/crewAI.zip /tmp/ → le fichier arrive à /tmp/crewAI.zip
+# (pas /tmp/unified_system/crewAI.zip). Le double-essai précédent était fragile.
+COPY unified_system/crewAI.zip /tmp/crewAI.zip
+RUN unzip -q /tmp/crewAI.zip -d /tmp/crewai_src \
     && CREWAI_DIR=$(find /tmp/crewai_src -maxdepth 1 -mindepth 1 -type d | head -1) \
     && pip install --no-cache-dir -e "$CREWAI_DIR" \
        || pip install --no-cache-dir crewai \
     && rm -rf /tmp/crewAI.zip /tmp/crewai_src
 
 # ── OpenHands depuis zip local ────────────────────────────────────────────────
-COPY unified_system/OpenHands.zip /tmp/
-RUN unzip -q /tmp/unified_system/OpenHands.zip -d /tmp/oh_src 2>/dev/null \
-    || unzip -q /tmp/OpenHands.zip -d /tmp/oh_src \
+COPY unified_system/OpenHands.zip /tmp/OpenHands.zip
+RUN unzip -q /tmp/OpenHands.zip -d /tmp/oh_src \
     && OH_DIR=$(find /tmp/oh_src -maxdepth 1 -mindepth 1 -type d | head -1) \
     && pip install --no-cache-dir -e "$OH_DIR" \
        || pip install --no-cache-dir openhands-ai \
     && rm -rf /tmp/OpenHands.zip /tmp/oh_src
 
 # ── OpenManus-RL depuis zip local — namespace package, PYTHONPATH ─────────────
-COPY unified_system/OpenManus-RL.zip /tmp/
-RUN unzip -q /tmp/unified_system/OpenManus-RL.zip -d /opt/openmanus_rl 2>/dev/null \
-    || unzip -q /tmp/OpenManus-RL.zip -d /opt/openmanus_rl \
+COPY unified_system/OpenManus-RL.zip /tmp/OpenManus-RL.zip
+RUN unzip -q /tmp/OpenManus-RL.zip -d /opt/openmanus_rl \
     && echo "/opt/openmanus_rl" > \
-       $(python -c "import site; print(site.getsitepackages()[0])")/openmanus_rl.pth \
+       "$(python -c 'import site; print(site.getsitepackages()[0])')/openmanus_rl.pth" \
     && rm -rf /tmp/OpenManus-RL.zip
 
 
