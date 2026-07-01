@@ -34,13 +34,26 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-# ── crewAI imports ─────────────────────────────────────────────────────────────
-from crewai import Agent, Crew, Task
-from crewai.tools.openhands_tool import OpenHandsTask
+# ── crewAI imports (optionnel — absent dans l'image Docker nexus_compose) ─────
+# crewAI est installé via son zip local dans bootstrap.sh (dev local).
+# Dans l'image Docker, le conteneur nexus_compose n'a pas crewAI installé :
+# le Unified System tourne via bridge.py + API HTTP OpenHands (service séparé).
+try:
+    from crewai import Agent, Crew, Task
+    from crewai.tools.openhands_tool import OpenHandsTask
+    _CREWAI_AVAILABLE = True
+except ImportError:
+    Agent = Crew = Task = OpenHandsTask = None  # type: ignore
+    _CREWAI_AVAILABLE = False
 
-# ── OpenManus-RL imports ──────────────────────────────────────────────────────
-from openmanus_rl.engines.openai import CrewAIEngine
-from openmanus_rl.multi_turn_rollout.tool_integration import SSRFSafeToolRegistry
+# ── OpenManus-RL imports (optionnel — namespace package via .pth) ─────────────
+try:
+    from openmanus_rl.engines.openai import CrewAIEngine
+    from openmanus_rl.multi_turn_rollout.tool_integration import SSRFSafeToolRegistry
+    _OPENMANUS_AVAILABLE = True
+except ImportError:
+    CrewAIEngine = SSRFSafeToolRegistry = None  # type: ignore
+    _OPENMANUS_AVAILABLE = False
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
