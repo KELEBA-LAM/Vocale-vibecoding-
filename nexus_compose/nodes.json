@@ -680,23 +680,6 @@
     "ref": "likec4/packages/mcp/src/tools/batch-read-elements.ts"
   },
   {
-    "id": "likec4.find_relationships",
-    "module_num": 5,
-    "module": "likec4",
-    "module_name": "LikeC4",
-    "repo": "likec4/likec4",
-    "subsection": "mcp",
-    "function": "find-relationships (MCP)",
-    "description": "Retourne TOUTES les relations directes d'un élément (entrantes + sortantes). Distinct de find-relationship-paths qui trouve les chemins entre deux éléments.",
-    "tag": "arch.query",
-    "phase": "arch",
-    "type": "elicit",
-    "io_raw": "elementId → relations directes",
-    "io_in": "elementId",
-    "io_out": "relations [from, to, label]",
-    "ref": "likec4/packages/mcp/src/tools/find-relationships.ts"
-  },
-  {
     "id": "c4if.executeaacstrategycommand",
     "module_num": 3,
     "module": "c4if",
@@ -2786,5 +2769,21 @@
     "io_in": "base CodeQL",
     "io_out": "findings (défaut GitHub)",
     "ref": "*/ql/src/codeql-suites/*-code-scanning.qls"
+  },
+  {
+    "id": "codegen.unified_system",
+    "module": "codegen",
+    "module_name": "Nexus Unified System",
+    "function": "unified_system",
+    "description": "Bridge nexus_compose → UnifiedSystem (crewAI + OpenHands + OpenManus-RL). Reçoit agent_prompt.txt de tmdd.generate_agent_prompt et délègue la génération de code au stack crewAI→OpenHands.",
+    "tag": "codegen.bridge",
+    "phase": "codegen",
+    "type": "bridge",
+    "io_in": "agent_prompt.txt (instruction de génération de code)",
+    "io_out": "code généré (sandbox OpenHands)",
+    "ref": "unified_system.bridge.UnifiedSystem.run_task",
+    "repo": "KELEBA-LAM/Vocale-vibecoding-",
+    "virtual": false,
+    "subsection": null
   }
 ]

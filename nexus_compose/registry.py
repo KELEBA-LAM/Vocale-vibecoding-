@@ -5,9 +5,16 @@ Builds the canonical, fully-wired ComposabilityGraph.
 
     build() → ComposabilityGraph   (call once at startup)
 
-All 158 nodes (153 parsed + 5 virtual) and all 197 edges are registered
+All 169 nodes (164 parsed + 5 virtual) and all 218 edges are registered
 here.  Each node gets its live handler from drivers.ALL_HANDLERS; nodes
 without a handler fall back to Node's built-in stub mode.
+
+Nœuds parsés (164) :
+  - 163 nœuds d'outils tiers (q2d, likec4, c4if, struct, clab, opa, bf,
+    td, pytm, neo4j, tmdd, semgrep, bearer, codeql)
+  - 1  nœud de pont  : codegen.unified_system (crewAI + OpenHands + RL)
+
+Nœuds virtuels (5) : LEON, CODEBASE, CODE_GENERATED, REPORT, PRODUCTION
 """
 from __future__ import annotations
 
@@ -247,9 +254,11 @@ RAW_EDGES: list[Tuple[str, str, str, EdgeType]] = [
     ("tmdd.tmdd_compile","tmdd.generate_agent_prompt","modèle consolidé",EdgeType.INJECT),
     ("tmdd.generate_diagram","REPORT","diagramme threat HTML",EdgeType.REPORT),
     ("tmdd.generate_report","REPORT","rapport TMDD",EdgeType.REPORT),
-    ("tmdd.generate_agent_prompt","CODE_GENERATED","contraintes injectées",EdgeType.INJECT),
+    ("tmdd.generate_agent_prompt","codegen.unified_system","agent_prompt.txt → UnifiedSystem",EdgeType.INJECT),
+    ("tmdd.generate_agent_prompt","CODE_GENERATED","contraintes injectées (fallback direct)",EdgeType.INJECT),
     ("tmdd.generate_agent_prompt","semgrep.write_custom_semgrep_rule","menaces → règles SAST",EdgeType.INJECT),
     ("tmdd.generate_agent_prompt","opa.opa_check","contraintes → politique Rego",EdgeType.INJECT),
+    ("codegen.unified_system","CODE_GENERATED","code généré par crewAI+OpenHands",EdgeType.DATA_FLOW),
 
     # ── SEMGREP ───────────────────────────────────────────────────────────────
     ("semgrep.get_semgrep_rule_schema","semgrep.write_custom_semgrep_rule","schéma → règle",EdgeType.DATA_FLOW),
@@ -291,10 +300,6 @@ RAW_EDGES: list[Tuple[str, str, str, EdgeType]] = [
     ("codeql.suite_security_and_quality_q","neo4j.create","findings qualité SARIF",EdgeType.STORE),
     ("codeql.suite_code_scanning_qls","neo4j.create","findings GitHub SARIF",EdgeType.STORE),
     ("codeql.codeql_database_analyze","PRODUCTION","code audité sémantique",EdgeType.DATA_FLOW),
-
-    # ── CODEGEN BRIDGE (BUGFIX : nœud orphelin reconnecté) ───────────────────
-    ("tmdd.generate_agent_prompt","codegen.unified_system","prompt agent + contraintes TMDD",EdgeType.INJECT),
-    ("codegen.unified_system","CODE_GENERATED","code généré par UnifiedSystem",EdgeType.DATA_FLOW),
 ]
 
 
@@ -344,28 +349,7 @@ def build() -> ComposabilityGraph:
              ref="sortie pipeline", repo="–", virtual=True, subsection=None),
     ]
 
-    # ── 2b. hand-defined bridge nodes ─────────────────────────────────────────
-    # Ces nœuds ont un handler réel dans drivers.py (ALL_HANDLERS) mais ne sont
-    # PAS issus du parsing automatique des 14 outils externes (nodes.json) :
-    # ils sont spécifiques à ce dépôt et doivent donc être déclarés à la main.
-    #
-    # BUGFIX : "codegen.unified_system" est référencé par
-    # Orchestrator.codegen_pipeline() et Orchestrator.threat_model_pipeline()
-    # (orchestrator.py) et son handler _codegen_unified existe bien dans
-    # drivers.CODEGEN_HANDLERS / ALL_HANDLERS — mais avant ce correctif aucun
-    # Node n'était jamais enregistré pour cet id, donc G.node("codegen.unified_system")
-    # levait toujours KeyError et les deux pipelines ci-dessus plantaient à 100 %.
-    EXTRA_DEFS = [
-        dict(id="codegen.unified_system", module="codegen", module_name="Nexus Unified System",
-             function="UnifiedSystem.run_task",
-             description="Pont vers crewAI/OpenManus-RL — exécute la génération de code "
-                          "à partir du prompt agent TMDD (instruction + contraintes validées).",
-             tag="codegen.bridge", phase="codegen", type="bridge",
-             io_in="agent_prompt.txt + contraintes TMDD", io_out="code généré + rapport santé",
-             ref="unified_system/bridge.py", repo="–", virtual=False, subsection=None),
-    ]
-
-    all_raw = VIRTUAL_DEFS + EXTRA_DEFS + raw_nodes
+    all_raw = VIRTUAL_DEFS + raw_nodes
 
     # ── 3. register nodes ─────────────────────────────────────────────────────
     skipped = 0
